@@ -1,5 +1,7 @@
 ```rust
-impl ::tower-service::Service<CreateResource> for Client {
-
+impl ::tower_service::Service<CreateResource> for Client {
+    fn call() {
+        
+    }
 }
 ```
