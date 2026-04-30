@@ -1,0 +1,240 @@
+use indoc::indoc;
+
+fn generate(spec_yaml: &str) -> String {
+    let spec = oas3::from_yaml(spec_yaml).expect("spec parses");
+    let tokens = tower_openapi_client::build(&spec).expect("codegen");
+    let file = syn::parse_file(&tokens.to_string()).expect("valid Rust");
+    prettyplease::unparse(&file)
+}
+
+#[test]
+fn get_with_path_param_emits_request_and_response() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        components:
+          schemas:
+            Pet:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+        paths:
+          /pets/{id}:
+            get:
+              operationId: getPet
+              parameters:
+                - name: id
+                  in: path
+                  required: true
+                  schema: { type: string }
+                - name: limit
+                  in: query
+                  schema: { type: integer }
+              responses:
+                "200":
+                  description: OK
+                  content:
+                    application/json:
+                      schema:
+                        $ref: "#/components/schemas/Pet"
+                "404":
+                  description: missing
+    "##});
+
+    assert!(
+        rendered.contains("pub struct GetPetRequest"),
+        "missing request struct:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub id: String"),
+        "path param missing:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub limit: Option<i64>"),
+        "query param missing or wrong optionality:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub enum GetPetResponse"),
+        "missing response enum:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Status200"),
+        "missing 200 variant:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("Status404"),
+        "missing 404 variant:\n{rendered}"
+    );
+    assert!(rendered.contains("pub const METHOD: ::http::Method = ::http::Method::GET"));
+    assert!(rendered.contains(r#"pub const PATH_TEMPLATE: &'static str = "/pets/{id}""#));
+}
+
+#[test]
+fn post_with_request_body_adds_body_field() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        components:
+          schemas:
+            NewPet:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+        paths:
+          /pets:
+            post:
+              operationId: createPet
+              requestBody:
+                required: true
+                content:
+                  application/json:
+                    schema:
+                      $ref: "#/components/schemas/NewPet"
+              responses:
+                "201":
+                  description: created
+                  content:
+                    application/json:
+                      schema:
+                        $ref: "#/components/schemas/NewPet"
+                default:
+                  description: any other status
+    "##});
+
+    assert!(rendered.contains("pub struct CreatePetRequest"));
+    assert!(
+        rendered.contains("pub body: super::components::NewPet"),
+        "body field should reference components::NewPet:\n{rendered}"
+    );
+    assert!(rendered.contains("pub enum CreatePetResponse"));
+    assert!(rendered.contains("Status201"));
+    assert!(
+        rendered.contains("Default"),
+        "default branch missing:\n{rendered}"
+    );
+}
+
+#[test]
+fn missing_operation_id_synthesises_method_path_name() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        paths:
+          /pets/{id}/favourite:
+            put:
+              responses:
+                "204":
+                  description: no content
+    "##});
+
+    // method + path segments collapsed into one PascalCase ident.
+    assert!(
+        rendered.contains("pub struct PutPetsIdFavouriteRequest"),
+        "synth name wrong:\n{rendered}"
+    );
+}
+
+#[test]
+fn ignored_headers_do_not_become_fields() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        paths:
+          /things:
+            get:
+              operationId: listThings
+              parameters:
+                - name: Accept
+                  in: header
+                  schema: { type: string }
+                - name: Content-Type
+                  in: header
+                  schema: { type: string }
+                - name: Authorization
+                  in: header
+                  schema: { type: string }
+                - name: X-Trace-Id
+                  in: header
+                  schema: { type: string }
+              responses:
+                "200":
+                  description: ok
+    "##});
+
+    assert!(rendered.contains("pub struct ListThingsRequest"));
+    assert!(
+        rendered.contains("pub x_trace_id"),
+        "trace header should remain:\n{rendered}"
+    );
+    assert!(!rendered.contains("pub accept"));
+    assert!(!rendered.contains("pub content_type"));
+    assert!(!rendered.contains("pub authorization"));
+}
+
+#[test]
+fn colliding_param_names_get_location_suffix() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        paths:
+          /items/{id}:
+            get:
+              operationId: getItem
+              parameters:
+                - name: id
+                  in: path
+                  required: true
+                  schema: { type: string }
+                - name: id
+                  in: query
+                  schema: { type: string }
+              responses:
+                "200":
+                  description: ok
+    "##});
+
+    assert!(rendered.contains("pub id: String"));
+    assert!(
+        rendered.contains("pub id_query: Option<String>"),
+        "second id should be suffixed:\n{rendered}"
+    );
+    assert!(rendered.contains(r#"#[serde(rename = "id")]"#));
+}
+
+#[test]
+fn path_and_operation_parameter_merge_operation_wins() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        paths:
+          /x/{id}:
+            parameters:
+              - name: id
+                in: path
+                required: true
+                schema: { type: integer, format: int32 }
+            get:
+              operationId: getX
+              parameters:
+                - name: id
+                  in: path
+                  required: true
+                  description: overridden
+                  schema: { type: string }
+              responses:
+                "200":
+                  description: ok
+    "##});
+
+    // Operation-level override wins: id should be String, not i32.
+    assert!(
+        rendered.contains("pub id: String"),
+        "operation-level override should win:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("pub id: i32"),
+        "path-level schema should have been replaced:\n{rendered}"
+    );
+}
