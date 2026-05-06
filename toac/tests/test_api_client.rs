@@ -16,10 +16,8 @@ use std::{
 use ::bytes::Bytes;
 use ::http::{Method, Request, Response};
 use ::http_body_util::{BodyExt, Empty, Full};
+use ::toac::{ApiClient, CallError, DecodeError, FromHttpResponse, IntoHttpRequest, Operation};
 use ::tower::{Service, ServiceExt};
-use ::tower_openapi_client::runtime::{
-    ApiClient, CallError, DecodeError, FromHttpResponse, IntoHttpRequest, Operation,
-};
 
 // ---------------------------------------------------------------------------
 // Minimal hand-written "generated" types.
@@ -145,17 +143,10 @@ impl Service<Request<Empty<Bytes>>> for RecordingTransport {
 fn api_client_prefixes_base_url_and_decodes_ok() {
     let transport = RecordingTransport::new(200, Bytes::from(r#"{"id":"abc","name":"rex"}"#));
     let uri_tap = transport.last_uri.clone();
-    let mut client = ApiClient::new(transport, "https://api.example.com");
+    let client = ApiClient::new(transport, "https://api.example.com");
 
     let req = GetPetRequest { id: "abc".into() };
-    let resp = futures_executor::block_on(async move {
-        <ApiClient<_> as ServiceExt<GetPetRequest>>::ready(&mut client)
-            .await
-            .expect("ready")
-            .call(req)
-            .await
-    })
-    .expect("call ok");
+    let resp = futures_executor::block_on(client.oneshot(req)).expect("call ok");
 
     match resp {
         GetPetResponse::Status200(pet) => {
@@ -174,17 +165,10 @@ fn api_client_trims_trailing_slash_in_base_url() {
     let transport = RecordingTransport::new(404, Bytes::new());
     let uri_tap = transport.last_uri.clone();
     // base URL with trailing slash — must not double up.
-    let mut client = ApiClient::new(transport, "https://api.example.com/");
+    let client = ApiClient::new(transport, "https://api.example.com/");
 
     let req = GetPetRequest { id: "xyz".into() };
-    let resp = futures_executor::block_on(async move {
-        <ApiClient<_> as ServiceExt<GetPetRequest>>::ready(&mut client)
-            .await
-            .expect("ready")
-            .call(req)
-            .await
-    })
-    .expect("call ok");
+    let resp = futures_executor::block_on(client.oneshot(req)).expect("call ok");
 
     assert!(matches!(resp, GetPetResponse::Status404));
     assert_eq!(
@@ -212,15 +196,9 @@ fn transport_error_is_wrapped() {
         }
     }
 
-    let mut client = ApiClient::new(AlwaysFails, "https://x");
-    let err = futures_executor::block_on(async move {
-        <ApiClient<_> as ServiceExt<GetPetRequest>>::ready(&mut client)
-            .await
-            .expect("ready")
-            .call(GetPetRequest { id: "x".into() })
-            .await
-    })
-    .expect_err("transport should fail");
+    let client = ApiClient::new(AlwaysFails, "https://x");
+    let err = futures_executor::block_on(client.oneshot(GetPetRequest { id: "x".into() }))
+        .expect_err("transport should fail");
 
     match err {
         CallError::Transport(msg) => assert_eq!(msg, "boom"),

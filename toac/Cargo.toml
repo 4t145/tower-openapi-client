@@ -1,0 +1,28 @@
+[package]
+name = "toac"
+description = "Tower-compatible OpenAPI client runtime. Types and traits that generated code from `toac-build` links against."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+tower-http = { workspace = true }
+base64 = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+futures-executor = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+
+[features]
+# Enables `Base64String`, which wraps `bytes::Bytes` and projects to/from
+# standard base64 at serde / display boundaries. Required when generated
+# code uses `BuildOptions::use_base64_string = true`.
+base64 = ["dep:base64"]

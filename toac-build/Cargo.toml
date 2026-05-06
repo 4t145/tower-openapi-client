@@ -1,0 +1,19 @@
+[package]
+name = "toac-build"
+description = "Code generator for the `toac` Tower-compatible OpenAPI client runtime. Typically invoked from a consumer's build.rs."
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+http = { workspace = true }
+oas3 = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+thiserror = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+anyhow = { workspace = true }
+indoc = { workspace = true }
+prettyplease = { workspace = true }

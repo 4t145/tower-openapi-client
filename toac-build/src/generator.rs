@@ -45,10 +45,36 @@ pub enum Stage {
     Operations,
 }
 
+/// Codegen tunables passed through to the generator.
+///
+/// Every flag here makes the generator emit a richer Rust type in place
+/// of a plain `String`. The default has all flags off so that the
+/// produced code compiles without adding new dependencies — callers
+/// must add the corresponding crates themselves (`chrono`, `uuid`, or
+/// this crate's own `base64` feature) when turning a flag on.
+#[derive(Debug, Clone, Default)]
+pub struct BuildOptions {
+    /// Emit `::chrono::DateTime<::chrono::Utc>` for `format: date-time`,
+    /// `::chrono::NaiveDate` for `format: date`, and
+    /// `::chrono::NaiveTime` for `format: time`.
+    pub use_chrono: bool,
+
+    /// Emit `::uuid::Uuid` for `format: uuid`.
+    pub use_uuid: bool,
+
+    /// Emit `::toac::Base64String` for `format: byte`. Requires the
+    /// consumer to enable the `base64` feature of the `toac` runtime
+    /// crate.
+    pub use_base64_string: bool,
+}
+
 /// Whole-program state shared across every generation stage.
 pub struct Generator<'a> {
     /// The OpenAPI spec being generated from.
     pub(crate) spec: &'a oas3::Spec,
+
+    /// Codegen options selected by the caller.
+    pub(crate) options: BuildOptions,
 
     /// Stable emission order per stage, keyed by registry key
     /// (ref path / hoist key / extra key).
@@ -71,19 +97,31 @@ pub struct Generator<'a> {
 }
 
 impl<'a> Generator<'a> {
-    /// Creates an empty generator bound to `spec`.
+    /// Creates an empty generator bound to `spec` with default options.
     pub fn new(spec: &'a oas3::Spec) -> Self {
+        Self::with_options(spec, BuildOptions::default())
+    }
+
+    /// Creates an empty generator bound to `spec`, configured with the
+    /// supplied [`BuildOptions`].
+    pub fn with_options(spec: &'a oas3::Spec, options: BuildOptions) -> Self {
         let mut orders: BTreeMap<Stage, Vec<String>> = BTreeMap::new();
         orders.insert(Stage::Components, Vec::new());
         orders.insert(Stage::Operations, Vec::new());
         Self {
             spec,
+            options,
             orders,
             items: BTreeMap::new(),
             type_paths: BTreeMap::new(),
             current_stage: Stage::Components,
             anon_counter: 0,
         }
+    }
+
+    /// Returns the active codegen options.
+    pub fn options(&self) -> &BuildOptions {
+        &self.options
     }
 
     /// Switches the active stage. Items emitted afterwards register under

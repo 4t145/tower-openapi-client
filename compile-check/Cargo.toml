@@ -1,0 +1,35 @@
+[package]
+name = "toac-compile-check"
+version = "0.0.0"
+edition.workspace = true
+# Never published: this crate exists only to run the generated code
+# through rustc inside CI / local test runs.
+publish = false
+
+[lib]
+# Make `cargo doc` treat the generated module as a normal lib surface.
+path = "src/lib.rs"
+
+# `toac-build` builds the code; `toac` is the runtime the generated
+# code links against.
+[build-dependencies]
+toac-build = { workspace = true }
+oas3 = { workspace = true }
+syn = { workspace = true }
+prettyplease = { workspace = true }
+
+[dependencies]
+toac = { workspace = true, features = ["base64"] }
+bytes = { workspace = true, features = ["serde"] }
+chrono = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tower = { workspace = true, features = ["util"] }
+http-body = { workspace = true }
+futures-executor = { workspace = true }

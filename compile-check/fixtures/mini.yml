@@ -1,0 +1,110 @@
+openapi: 3.1.0
+info:
+  title: Compile-check mini spec
+  version: "0"
+components:
+  schemas:
+    # Plain object with a required field — exercised by the body of a
+    # POST and as a 200 payload.
+    Pet:
+      type: object
+      required: [id, name]
+      properties:
+        id: { type: string }
+        name: { type: string }
+
+    NewPet:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string }
+
+    # One of tagged variants — exercises the sum-enum codegen plus
+    # From/TryFrom impls.
+    PetOrError:
+      oneOf:
+        - $ref: "#/components/schemas/Pet"
+        - $ref: "#/components/schemas/Error"
+
+    Error:
+      type: object
+      required: [message]
+      properties:
+        message: { type: string }
+
+    # Exercise string formats: every field maps to a richer Rust type
+    # when BuildOptions enables the corresponding flag.
+    FormatSample:
+      type: object
+      required: [id, created_at, payload]
+      properties:
+        id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        birthday:
+          type: string
+          format: date
+        wake_time:
+          type: string
+          format: time
+        payload:
+          type: string
+          format: byte
+        blob:
+          type: string
+          format: binary
+
+paths:
+  /pets/{id}:
+    get:
+      operationId: getPet
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, format: int32 }
+        - name: X-Trace
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"
+        "404":
+          description: missing
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+        default:
+          description: fallback
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Error"
+
+  /pets:
+    post:
+      operationId: createPet
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NewPet"
+      responses:
+        "201":
+          description: created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Pet"

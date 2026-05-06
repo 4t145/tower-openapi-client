@@ -2,7 +2,7 @@ use indoc::indoc;
 
 fn generate(spec_yaml: &str) -> String {
     let spec = oas3::from_yaml(spec_yaml).expect("spec parses");
-    let tokens = tower_openapi_client::build_components(&spec).expect("codegen");
+    let tokens = toac_build::build_components(&spec).expect("codegen");
     let file = syn::parse_file(&tokens.to_string()).expect("valid Rust");
     prettyplease::unparse(&file)
 }

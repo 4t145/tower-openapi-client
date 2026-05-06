@@ -1,10 +1,15 @@
-//! Runtime support traits and helpers for generated client code.
+//! Tower-compatible OpenAPI client runtime.
 //!
-//! The generated `{Op}Request` and `{Op}Response` types implement the two
-//! body-transform traits defined here. [`ApiClient`] then binds any
-//! [`tower::Service`] that speaks `http::Request` / `http::Response` into a
-//! `Service<Op>` that accepts a typed request and yields the typed
-//! response enum.
+//! `toac` is the library half of the code-generation/runtime split: the
+//! `toac-build` crate emits Rust code at build time, and the generated
+//! code links against the types and traits defined here.
+//!
+//! The two body-transform traits — [`IntoHttpRequest`] and
+//! [`FromHttpResponse`] — plumb generated `{Op}Request` /
+//! `{Op}Response` values through any `http::Request` /
+//! `http::Response` transport. [`ApiClient`] wraps a
+//! [`tower::Service`] and adapts it to `Service<Op>`, so callers
+//! drive the API through typed operation values.
 
 use std::{
     future::Future,
@@ -216,4 +221,140 @@ fn prefix_base_url<B>(req: Request<B>, base_url: &str) -> Request<B> {
 /// doesn't produce a doubled separator.
 fn trim_trailing_slash(s: &str) -> &str {
     s.strip_suffix('/').unwrap_or(s)
+}
+
+/// Byte buffer whose textual/serde projection is standard base64.
+///
+/// OpenAPI's `type: string, format: byte` expects base64-encoded payloads
+/// on the wire while the decoded value is raw bytes. `Base64String` keeps
+/// bytes in memory (through [`bytes::Bytes`]) and transparently flips to
+/// a base64 string whenever the value crosses a serde boundary or is
+/// displayed.
+///
+/// Round-trip: `serde_json::to_string` / `from_str` always goes through
+/// base64 — decoding rejects invalid input with a serde error.
+#[cfg(feature = "base64")]
+#[derive(Clone, PartialEq, Eq, Hash, Default)]
+pub struct Base64String(::bytes::Bytes);
+
+#[cfg(feature = "base64")]
+impl Base64String {
+    /// Wraps raw bytes without encoding.
+    pub fn from_bytes(bytes: impl Into<::bytes::Bytes>) -> Self {
+        Self(bytes.into())
+    }
+
+    /// Returns a view over the raw bytes.
+    pub fn as_bytes(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+
+    /// Extracts the underlying [`bytes::Bytes`] without copying.
+    pub fn into_bytes(self) -> ::bytes::Bytes {
+        self.0
+    }
+
+    /// Decodes a base64 string using the standard alphabet with padding.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`base64::DecodeError`] if the input is not valid base64.
+    pub fn decode(encoded: &str) -> Result<Self, ::base64::DecodeError> {
+        use ::base64::Engine as _;
+        let bytes = ::base64::engine::general_purpose::STANDARD.decode(encoded)?;
+        Ok(Self(::bytes::Bytes::from(bytes)))
+    }
+
+    /// Encodes the contained bytes as a base64 string.
+    pub fn encode(&self) -> String {
+        use ::base64::Engine as _;
+        ::base64::engine::general_purpose::STANDARD.encode(self.0.as_ref())
+    }
+}
+
+#[cfg(feature = "base64")]
+impl std::fmt::Display for Base64String {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.encode())
+    }
+}
+
+#[cfg(feature = "base64")]
+impl std::fmt::Debug for Base64String {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Base64String").field(&self.encode()).finish()
+    }
+}
+
+#[cfg(feature = "base64")]
+impl From<::bytes::Bytes> for Base64String {
+    fn from(value: ::bytes::Bytes) -> Self {
+        Self(value)
+    }
+}
+
+#[cfg(feature = "base64")]
+impl From<Vec<u8>> for Base64String {
+    fn from(value: Vec<u8>) -> Self {
+        Self(::bytes::Bytes::from(value))
+    }
+}
+
+#[cfg(feature = "base64")]
+impl AsRef<[u8]> for Base64String {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+#[cfg(feature = "base64")]
+impl serde::Serialize for Base64String {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.encode())
+    }
+}
+
+#[cfg(feature = "base64")]
+impl<'de> serde::Deserialize<'de> for Base64String {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+        let encoded =
+            <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
+        Self::decode(&encoded).map_err(D::Error::custom)
+    }
+}
+
+#[cfg(all(test, feature = "base64"))]
+mod base64_tests {
+    use super::Base64String;
+
+    #[test]
+    fn json_round_trip() {
+        let original = Base64String::from_bytes(b"hello".as_slice().to_vec());
+        let json = serde_json::to_string(&original).unwrap();
+        assert_eq!(json, "\"aGVsbG8=\"");
+        let decoded: Base64String = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.as_bytes(), b"hello");
+    }
+
+    #[test]
+    fn display_emits_base64() {
+        let v = Base64String::from_bytes(vec![0x00, 0xff, 0x10]);
+        assert_eq!(v.to_string(), "AP8Q");
+    }
+
+    #[test]
+    fn invalid_base64_errors_on_deserialize() {
+        let err = serde_json::from_str::<Base64String>("\"not base64!\"").unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid")
+                || err.to_string().to_lowercase().contains("base64")
+        );
+    }
 }

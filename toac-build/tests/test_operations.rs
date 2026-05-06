@@ -2,7 +2,7 @@ use indoc::indoc;
 
 fn generate(spec_yaml: &str) -> String {
     let spec = oas3::from_yaml(spec_yaml).expect("spec parses");
-    let tokens = tower_openapi_client::build(&spec).expect("codegen");
+    let tokens = toac_build::build(&spec).expect("codegen");
     let file = syn::parse_file(&tokens.to_string()).expect("valid Rust");
     prettyplease::unparse(&file)
 }
@@ -200,7 +200,12 @@ fn colliding_param_names_get_location_suffix() {
         rendered.contains("pub id_query: Option<String>"),
         "second id should be suffixed:\n{rendered}"
     );
-    assert!(rendered.contains(r#"#[serde(rename = "id")]"#));
+    // The wire name is applied inside IntoHttpRequest rather than via a
+    // serde rename — the query rendering pushes the literal "id" key.
+    assert!(
+        rendered.contains("__path.push_str(\"id\")"),
+        "wire name not carried into query encoding:\n{rendered}"
+    );
 }
 
 #[test]

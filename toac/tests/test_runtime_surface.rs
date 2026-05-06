@@ -12,7 +12,7 @@
 use ::bytes::Bytes;
 use ::http::Response;
 use ::http_body_util::{BodyExt, Empty, Full};
-use ::tower_openapi_client::runtime::{DecodeError, FromHttpResponse, IntoHttpRequest};
+use ::toac::{DecodeError, FromHttpResponse, IntoHttpRequest};
 
 // Hand-written mirror of a GET with one path param, one optional query
 // param, and one optional header.

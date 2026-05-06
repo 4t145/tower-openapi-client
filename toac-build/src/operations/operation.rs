@@ -376,14 +376,12 @@ fn disambiguate_field(
 }
 
 /// Turns a [`ParamSlot`] into its struct field representation.
+///
+/// The request struct is never serialised through `serde` — the wire
+/// name is applied at request-building time inside `IntoHttpRequest` —
+/// so no `#[serde(rename)]` attribute is emitted here.
 fn param_to_field(slot: &ParamSlot) -> syn::Field {
     let mut attrs: Vec<syn::Attribute> = Vec::new();
-    let rendered = slot.field_ident.to_string();
-    let canonical = rendered.strip_prefix("r#").unwrap_or(&rendered);
-    if canonical != slot.parameter.name {
-        let wire = slot.parameter.name.as_str();
-        attrs.push(parse_quote!(#[serde(rename = #wire)]));
-    }
     push_field_docs(
         &mut attrs,
         parameter_description(&slot.parameter).as_deref(),
@@ -544,9 +542,10 @@ fn build_into_http_request_impl(
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
     let body_tokens = render_body_statement(body);
+    let into_http_request = crate::constants::runtime_path("IntoHttpRequest");
 
     parse_quote! {
-        impl ::tower_openapi_client::runtime::IntoHttpRequest<#body_ty>
+        impl #into_http_request<#body_ty>
             for #request_ident
         {
             fn into_http_request(
@@ -585,8 +584,9 @@ fn build_operation_impl(
     } else {
         parse_quote!(::http_body_util::Empty<::bytes::Bytes>)
     };
+    let operation_trait = crate::constants::runtime_path("Operation");
     parse_quote! {
-        impl ::tower_openapi_client::runtime::Operation for #request_ident {
+        impl #operation_trait for #request_ident {
             type RequestBody = #request_body_ty;
             type Response = #response_ident;
         }
@@ -604,6 +604,9 @@ fn build_from_http_response_impl(
     response_ident: &syn::Ident,
     variants: &[ResponseVariant],
 ) -> syn::Item {
+    let from_http_response = crate::constants::runtime_path("FromHttpResponse");
+    let decode_error = crate::constants::runtime_path("DecodeError");
+
     let arms: Vec<proc_macro2::TokenStream> =
         variants.iter().filter_map(response_match_arm).collect();
     let default_arm = variants
@@ -613,7 +616,7 @@ fn build_from_http_response_impl(
         Some(variant) => default_fallback_tokens(response_ident, variant),
         None => quote! {
             return ::std::result::Result::Err(
-                ::tower_openapi_client::runtime::DecodeError::UnexpectedStatus(__status),
+                #decode_error::UnexpectedStatus(__status),
             );
         },
     };
@@ -649,7 +652,7 @@ fn build_from_http_response_impl(
                 BodyExt::collect(__body)
                     .await
                     .map_err(|e| {
-                        ::tower_openapi_client::runtime::DecodeError::BodyRead(
+                        #decode_error::BodyRead(
                             ::std::boxed::Box::new(e),
                         )
                     })?
@@ -663,14 +666,14 @@ fn build_from_http_response_impl(
     };
 
     parse_quote! {
-        impl<__B> ::tower_openapi_client::runtime::FromHttpResponse<__B>
+        impl<__B> #from_http_response<__B>
             for #response_ident
         where
             __B: ::http_body::Body + ::std::marker::Send,
             __B::Data: ::std::marker::Send,
             __B::Error: ::std::error::Error + ::std::marker::Send + ::std::marker::Sync + 'static,
         {
-            type Error = ::tower_openapi_client::runtime::DecodeError;
+            type Error = #decode_error;
 
             fn from_http_response(
                 response: ::http::Response<__B>,

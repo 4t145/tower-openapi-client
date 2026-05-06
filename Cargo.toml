@@ -1,48 +1,48 @@
-[package]
-name = "tower-openapi-client"
+[workspace]
+resolver = "3"
+# In-tree crates:
+# - `toac`          : the runtime library the generated client links against
+# - `toac-build`    : the code generator, invoked from build scripts
+# - `compile-check` : private crate that runs the generator against a
+#                     fixture spec and compiles the result, so any
+#                     regression in emitted code surfaces as a build error
+# - `examples/petstore`: usage walkthrough on a real-world spec; opt-in
+members = ["toac", "toac-build", "compile-check", "examples/petstore"]
+# Keep day-to-day `cargo test` / `cargo build` on the library + its
+# compile guard; the example is a `cargo run -p petstore-example` affair.
+default-members = ["toac", "toac-build", "compile-check"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 
-[dependencies]
+[workspace.dependencies]
+# In-tree crates, referenced by both compile-check and the petstore
+# example through `{ workspace = true }`.
+toac = { path = "toac", version = "0.1.0" }
+toac-build = { path = "toac-build", version = "0.1.0" }
+
+# Shared third-party deps so every crate in the workspace picks the same
+# version. Individual crates opt into features as needed.
 http = "1"
+http-body = "1"
+http-body-util = "0.1"
+bytes = "1"
+serde = "1"
+serde_json = "1"
+thiserror = "2"
+tower = "0.5"
+tower-http = "0.6"
 oas3 = { version = "0.21", features = ["yaml-spec"] }
-# proc-macro2 = "1.0.101"
+proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
-thiserror = "2"
-serde_json = "1"
-proc-macro2 = "1"
+base64 = "0.22"
 
-tower = { version = "0", features = ["util"], optional = true }
-tower-http = { version = "0", optional = true  }
-http-body = { version = "1", optional = true  }
-http-body-util = { version = "0.1", optional = true }
-bytes = { version = "1", optional = true }
-serde = { version = "1", features = ["derive"], optional = true }
-
-
-[dev-dependencies]
+# Dev / tooling.
 anyhow = "1"
-tower = "0"
-tower-http = "0"
-http = "1"
-http-body = { version = "1" }
-http-body-util = { version = "0.1", features = ["full"] }
-bytes = "1"
-prettyplease = "0.2"
-indoc = "2"
+chrono = { version = "0.4", features = ["serde"] }
 futures-executor = "0.3"
-serde = { version = "1", features = ["derive"] }
-
-[features]
-default = ["runtime"]
-chrono = []
-uuid = []
-runtime = [
-    "dep:tower",
-    "dep:tower-http",
-    "dep:http-body",
-    "dep:http-body-util",
-    "dep:bytes",
-    "dep:serde",
-]
+indoc = "2"
+prettyplease = "0.2"
+uuid = { version = "1", features = ["serde"] }

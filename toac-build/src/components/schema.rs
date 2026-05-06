@@ -94,7 +94,7 @@ impl<'a> Generator<'a> {
             Shape::Object => self.build_struct(type_name, schema, attrs),
             Shape::TypedPrimitive(ty) => {
                 let alias_attrs = doc_attrs(schema);
-                let ty = apply_format(*ty, schema);
+                let ty = self.apply_format(*ty, schema);
                 Ok(parse_quote! {
                     #(#alias_attrs)*
                     pub type #type_name = #ty;
@@ -267,7 +267,7 @@ impl<'a> Generator<'a> {
                 self.store_hoisted(type_name.clone(), item);
                 parse_quote!(#type_name)
             }
-            Shape::TypedPrimitive(ty) => apply_format(*ty, schema),
+            Shape::TypedPrimitive(ty) => self.apply_format(*ty, schema),
             Shape::Array => {
                 let item_ty = self.array_item_type_inline(parent_type, field_name, schema)?;
                 parse_quote!(Vec<#item_ty>)
@@ -511,21 +511,50 @@ fn primitive_type(ty: &SchemaType) -> Option<syn::Type> {
     Some(out)
 }
 
-/// Applies schema `format` overrides to integer/number primitives.
-fn apply_format(ty: syn::Type, schema: &ObjectSchema) -> syn::Type {
-    let Some(format) = schema.format.as_deref() else {
-        return ty;
-    };
-    let overridden: Option<syn::Type> = match format {
-        "int32" => Some(parse_quote!(i32)),
-        "int64" => Some(parse_quote!(i64)),
-        "uint32" => Some(parse_quote!(u32)),
-        "uint64" => Some(parse_quote!(u64)),
-        "float" => Some(parse_quote!(f32)),
-        "double" => Some(parse_quote!(f64)),
-        _ => None,
-    };
-    overridden.unwrap_or(ty)
+impl<'a> crate::Generator<'a> {
+    /// Applies `format` overrides for both numeric and string primitives.
+    ///
+    /// Numeric overrides (`int32`, `uint64`, `float`, ...) are always
+    /// applied. String overrides (`date-time`, `uuid`, `byte`,
+    /// `binary`) only kick in when the matching flag is set in
+    /// [`crate::BuildOptions`]; otherwise the base type (usually
+    /// `String`) is kept.
+    pub(crate) fn apply_format(&self, ty: syn::Type, schema: &ObjectSchema) -> syn::Type {
+        let Some(format) = schema.format.as_deref() else {
+            return ty;
+        };
+        let overridden: Option<syn::Type> = match format {
+            // Numeric formats — emitted unconditionally.
+            "int32" => Some(parse_quote!(i32)),
+            "int64" => Some(parse_quote!(i64)),
+            "uint32" => Some(parse_quote!(u32)),
+            "uint64" => Some(parse_quote!(u64)),
+            "float" => Some(parse_quote!(f32)),
+            "double" => Some(parse_quote!(f64)),
+
+            // String formats — gated on the caller's BuildOptions so we
+            // don't force downstream crates to add dependencies they
+            // don't want.
+            "date-time" if self.options.use_chrono => {
+                Some(parse_quote!(::chrono::DateTime<::chrono::Utc>))
+            }
+            "date" if self.options.use_chrono => Some(parse_quote!(::chrono::NaiveDate)),
+            "time" if self.options.use_chrono => Some(parse_quote!(::chrono::NaiveTime)),
+            "uuid" if self.options.use_uuid => Some(parse_quote!(::uuid::Uuid)),
+            "byte" if self.options.use_base64_string => {
+                let path = crate::constants::runtime_path("Base64String");
+                Some(parse_quote!(#path))
+            }
+            // `binary` payloads are the raw request/response body shape
+            // (multipart / octet-stream). `bytes::Bytes` is always
+            // available through the runtime, so no opt-in
+            // needed.
+            "binary" => Some(parse_quote!(::bytes::Bytes)),
+
+            _ => None,
+        };
+        overridden.unwrap_or(ty)
+    }
 }
 
 fn maybe_optionalise(ty: syn::Type, nullable: bool) -> syn::Type {

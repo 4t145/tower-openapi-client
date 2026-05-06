@@ -6,7 +6,7 @@ use indoc::indoc;
 
 fn generate(spec_yaml: &str) -> String {
     let spec = oas3::from_yaml(spec_yaml).expect("spec parses");
-    let tokens = tower_openapi_client::build(&spec).expect("codegen");
+    let tokens = toac_build::build(&spec).expect("codegen");
     let file = syn::parse_file(&tokens.to_string()).expect("valid Rust");
     prettyplease::unparse(&file)
 }
@@ -53,7 +53,7 @@ fn into_http_request_emitted_for_get_with_path_and_query() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains("impl ::tower_openapi_client::runtime::IntoHttpRequest<::http_body_util::Empty<::bytes::Bytes>> for GetPetRequest"),
+        compact.contains("impl ::toac::IntoHttpRequest<::http_body_util::Empty<::bytes::Bytes>> for GetPetRequest"),
         "IntoHttpRequest impl with Empty body not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
     assert!(
@@ -158,13 +158,11 @@ fn from_http_response_dispatches_on_status() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains(
-            "impl<__B> ::tower_openapi_client::runtime::FromHttpResponse<__B> for GetPetResponse"
-        ),
+        compact.contains("impl<__B> ::toac::FromHttpResponse<__B> for GetPetResponse"),
         "FromHttpResponse impl not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
     assert!(
-        rendered.contains("type Error = ::tower_openapi_client::runtime::DecodeError"),
+        rendered.contains("type Error = ::toac::DecodeError"),
         "associated Error type wrong:\n{rendered}"
     );
     // known numeric status arms
@@ -268,7 +266,7 @@ fn operation_impl_emitted_for_each_operation() {
 
     // GET without body -> Empty<Bytes>
     assert!(
-        compact.contains("impl ::tower_openapi_client::runtime::Operation for PingRequest"),
+        compact.contains("impl ::toac::Operation for PingRequest"),
         "PingRequest Operation impl missing:\ncompact:\n{compact}"
     );
     assert!(
@@ -282,7 +280,7 @@ fn operation_impl_emitted_for_each_operation() {
 
     // POST with body -> Full<Bytes>
     assert!(
-        compact.contains("impl ::tower_openapi_client::runtime::Operation for CreatePetRequest"),
+        compact.contains("impl ::toac::Operation for CreatePetRequest"),
         "CreatePetRequest Operation impl missing:\n{rendered}"
     );
     assert!(
@@ -307,8 +305,7 @@ fn unknown_status_without_default_returns_error() {
 
     let compact = compact(&rendered);
     assert!(
-        compact
-            .contains("::tower_openapi_client::runtime::DecodeError::UnexpectedStatus(__status)"),
+        compact.contains("::toac::DecodeError::UnexpectedStatus(__status)"),
         "UnexpectedStatus fallback missing:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
 }
