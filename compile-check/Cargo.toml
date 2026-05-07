@@ -10,13 +10,11 @@ publish = false
 # Make `cargo doc` treat the generated module as a normal lib surface.
 path = "src/lib.rs"
 
-# `toac-build` builds the code; `toac` is the runtime the generated
-# code links against.
+# `toac-build` handles the generation end-to-end through its
+# `Builder`; there's no need to pull oas3 / syn / prettyplease
+# separately.
 [build-dependencies]
 toac-build = { workspace = true }
-oas3 = { workspace = true }
-syn = { workspace = true }
-prettyplease = { workspace = true }
 
 [dependencies]
 toac = { workspace = true, features = ["base64"] }

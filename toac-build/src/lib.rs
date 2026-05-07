@@ -5,6 +5,7 @@
 //! `toac` crate at runtime; this crate is typically invoked from a
 //! consumer's `build.rs`.
 
+pub mod builder;
 pub mod components;
 pub mod constants;
 pub mod docs;
@@ -14,6 +15,7 @@ pub mod operations;
 
 use oas3::spec;
 
+pub use builder::{Builder, SpecFormat};
 pub use generator::{BuildOptions, Generator};
 
 /// Errors produced while generating client code from a spec.

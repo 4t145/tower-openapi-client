@@ -8,14 +8,10 @@ publish = false
 name = "petstore-example"
 path = "src/main.rs"
 
-# `toac-build` is the code generator; `toac` is the runtime the
-# generated code calls into. This mirrors the split a typical
-# downstream consumer would use.
+# `toac-build`'s `Builder` API handles parse / pretty / write, so the
+# build script only needs this one dep.
 [build-dependencies]
 toac-build = { workspace = true }
-oas3 = { workspace = true }
-syn = { workspace = true }
-prettyplease = { workspace = true }
 
 [dependencies]
 toac = { workspace = true, features = ["base64"] }
@@ -28,4 +24,8 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 uuid = { workspace = true }
-futures-executor = { workspace = true }
+client-util = { version = "0.3" }
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+

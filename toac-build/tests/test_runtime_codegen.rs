@@ -27,7 +27,7 @@ fn compact(rendered: &str) -> String {
 }
 
 #[test]
-fn into_http_request_emitted_for_get_with_path_and_query() {
+fn make_request_emitted_for_get_with_path_and_query() {
     let rendered = generate(indoc! {r##"
         openapi: 3.1.0
         info: { title: t, version: "0" }
@@ -53,11 +53,15 @@ fn into_http_request_emitted_for_get_with_path_and_query() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains("impl ::toac::IntoHttpRequest<::http_body_util::Empty<::bytes::Bytes>> for GetPetRequest"),
-        "IntoHttpRequest impl with Empty body not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
+        compact.contains("impl ::toac::MakeRequest for GetPetRequest"),
+        "MakeRequest impl (non-generic) not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
     assert!(
-        compact.contains("fn into_http_request(self)"),
+        compact.contains("Output = ::toac::Request"),
+        "make_request future output not ::toac::Request:\n{rendered}"
+    );
+    assert!(
+        compact.contains("fn make_request(self)"),
         "impl method missing:\n{rendered}"
     );
     // path template substitution
@@ -83,10 +87,15 @@ fn into_http_request_emitted_for_get_with_path_and_query() {
         compact.contains(".header(\"X-Trace\""),
         "header param not injected:\n{rendered}"
     );
+    // empty body uses Body::empty()
+    assert!(
+        compact.contains("::toac::body::Body::empty()"),
+        "empty body not rendered via toac::body::Body::empty():\n{rendered}"
+    );
 }
 
 #[test]
-fn into_http_request_uses_full_body_for_post() {
+fn make_request_wraps_body_for_post() {
     let rendered = generate(indoc! {r##"
         openapi: 3.1.0
         info: { title: t, version: "0" }
@@ -113,8 +122,12 @@ fn into_http_request_uses_full_body_for_post() {
     "##});
 
     assert!(
-        rendered.contains("::http_body_util::Full<::bytes::Bytes>"),
-        "Full<Bytes> not used for request body:\n{rendered}"
+        rendered.contains("::toac::body::Body::new"),
+        "body not wrapped through toac::body::Body::new:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("::http_body_util::Full::new"),
+        "Full<Bytes> inner body not used:\n{rendered}"
     );
     assert!(
         rendered.contains("::serde_json::to_vec(&self.body)"),
@@ -123,7 +136,7 @@ fn into_http_request_uses_full_body_for_post() {
 }
 
 #[test]
-fn from_http_response_dispatches_on_status() {
+fn parse_response_dispatches_on_status() {
     let rendered = generate(indoc! {r##"
         openapi: 3.1.0
         info: { title: t, version: "0" }
@@ -158,8 +171,16 @@ fn from_http_response_dispatches_on_status() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains("impl<__B> ::toac::FromHttpResponse<__B> for GetPetResponse"),
-        "FromHttpResponse impl not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
+        compact.contains("impl ::toac::ParseResponse for GetPetResponse"),
+        "ParseResponse impl not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
+    );
+    assert!(
+        compact.contains("response: ::http::Response<__B>"),
+        "parse_response does not take a generic ::http::Response<B>:\n{rendered}"
+    );
+    assert!(
+        compact.contains("__B: ::http_body::Body<Data = ::bytes::Bytes>"),
+        "parse_response body bound missing:\n{rendered}"
     );
     assert!(
         rendered.contains("type Error = ::toac::DecodeError"),
@@ -264,28 +285,30 @@ fn operation_impl_emitted_for_each_operation() {
 
     let compact = compact(&rendered);
 
-    // GET without body -> Empty<Bytes>
+    // Both operations share the same Operation trait with no body-type
+    // associated type; they only bind the response enum.
     assert!(
         compact.contains("impl ::toac::Operation for PingRequest"),
         "PingRequest Operation impl missing:\ncompact:\n{compact}"
-    );
-    assert!(
-        compact.contains("type RequestBody = ::http_body_util::Empty<::bytes::Bytes>"),
-        "Empty RequestBody not bound:\n{rendered}"
     );
     assert!(
         compact.contains("type Response = PingResponse"),
         "Ping Response type not bound:\n{rendered}"
     );
 
-    // POST with body -> Full<Bytes>
     assert!(
         compact.contains("impl ::toac::Operation for CreatePetRequest"),
         "CreatePetRequest Operation impl missing:\n{rendered}"
     );
     assert!(
-        compact.contains("type RequestBody = ::http_body_util::Full<::bytes::Bytes>"),
-        "Full RequestBody not bound:\n{rendered}"
+        compact.contains("type Response = CreatePetResponse"),
+        "CreatePet Response type not bound:\n{rendered}"
+    );
+
+    // RequestBody associated type is gone.
+    assert!(
+        !compact.contains("type RequestBody"),
+        "stale RequestBody associated type still emitted:\n{rendered}"
     );
 }
 

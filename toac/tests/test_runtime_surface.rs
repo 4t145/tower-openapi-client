@@ -1,6 +1,6 @@
 //! Exercises the runtime traits against a hand-written mirror of what
-//! the generator emits. This confirms `IntoHttpRequest` /
-//! `FromHttpResponse` are usable in isolation — the shape tests in
+//! the generator emits. This confirms `MakeRequest` / `ParseResponse`
+//! are usable in isolation — the shape tests in
 //! `test_runtime_codegen.rs` cover the generator's output form.
 //!
 //! The `manual_async_fn` lint is intentionally silenced: the trait
@@ -10,9 +10,8 @@
 #![allow(clippy::manual_async_fn)]
 
 use ::bytes::Bytes;
-use ::http::Response;
-use ::http_body_util::{BodyExt, Empty, Full};
-use ::toac::{DecodeError, FromHttpResponse, IntoHttpRequest};
+use ::http_body_util::{BodyExt, Full};
+use ::toac::{BoxError, DecodeError, MakeRequest, ParseResponse, Request, body::Body};
 
 // Hand-written mirror of a GET with one path param, one optional query
 // param, and one optional header.
@@ -23,10 +22,8 @@ pub struct GetPetRequest {
     pub x_trace: Option<String>,
 }
 
-impl IntoHttpRequest<Empty<Bytes>> for GetPetRequest {
-    fn into_http_request(
-        self,
-    ) -> impl ::std::future::Future<Output = ::http::Request<Empty<Bytes>>> + Send {
+impl MakeRequest for GetPetRequest {
+    fn make_request(self) -> impl ::std::future::Future<Output = Request> + Send {
         async move {
             let mut path = String::new();
             path.push_str("/pets/");
@@ -47,7 +44,7 @@ impl IntoHttpRequest<Empty<Bytes>> for GetPetRequest {
                 builder = builder.header("X-Trace", ToString::to_string(v));
             }
             let _ = query_first;
-            builder.body(Empty::new()).expect("valid request")
+            builder.body(Body::empty()).expect("valid request")
         }
     }
 }
@@ -64,22 +61,21 @@ pub enum GetPetResponse {
     Status404,
 }
 
-impl<B> FromHttpResponse<B> for GetPetResponse
-where
-    B: ::http_body::Body + Send,
-    B::Data: Send,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+impl ParseResponse for GetPetResponse {
     type Error = DecodeError;
 
-    fn from_http_response(
+    fn parse_response<B>(
         response: ::http::Response<B>,
-    ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send {
+    ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send
+    where
+        B: ::http_body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<BoxError>,
+    {
         async move {
             let (parts, body) = response.into_parts();
             let bytes = BodyExt::collect(body)
                 .await
-                .map_err(|e| DecodeError::BodyRead(Box::new(e)))?
+                .map_err(|e| DecodeError::BodyRead(e.into()))?
                 .to_bytes();
             match parts.status.as_u16() {
                 200 => {
@@ -105,16 +101,14 @@ pub struct CreatePetRequest {
     pub body: NewPet,
 }
 
-impl IntoHttpRequest<Full<Bytes>> for CreatePetRequest {
-    fn into_http_request(
-        self,
-    ) -> impl ::std::future::Future<Output = ::http::Request<Full<Bytes>>> + Send {
+impl MakeRequest for CreatePetRequest {
+    fn make_request(self) -> impl ::std::future::Future<Output = Request> + Send {
         async move {
             let bytes = ::serde_json::to_vec(&self.body).expect("serialise JSON");
             ::http::Request::builder()
                 .method(::http::Method::POST)
                 .uri("/pets")
-                .body(Full::new(Bytes::from(bytes)))
+                .body(Body::new(Full::new(Bytes::from(bytes))))
                 .expect("valid request")
         }
     }
@@ -131,7 +125,7 @@ fn request_with_path_query_header() {
         limit: Some(10),
         x_trace: Some("t1".into()),
     };
-    let http_req = futures_executor::block_on(req.into_http_request());
+    let http_req = futures_executor::block_on(req.make_request());
     assert_eq!(http_req.method(), ::http::Method::GET);
     let uri = http_req.uri().to_string();
     assert_eq!(uri, "/pets/abc?limit=10");
@@ -149,7 +143,7 @@ fn request_body_serialises_to_json() {
     let req = CreatePetRequest {
         body: NewPet { name: "rex".into() },
     };
-    let http_req = futures_executor::block_on(req.into_http_request());
+    let http_req = futures_executor::block_on(req.make_request());
     let (parts, body) = http_req.into_parts();
     assert_eq!(parts.method, ::http::Method::POST);
     let collected = futures_executor::block_on(body.collect())
@@ -161,30 +155,32 @@ fn request_body_serialises_to_json() {
 
 #[test]
 fn response_decodes_known_statuses() {
-    let ok = Response::builder()
+    let ok = ::http::Response::builder()
         .status(200)
-        .body(Full::new(Bytes::from(r#"{"id":"abc","name":"rex"}"#)))
+        .body(Body::new(Full::new(Bytes::from(
+            r#"{"id":"abc","name":"rex"}"#,
+        ))))
         .unwrap();
-    let decoded = futures_executor::block_on(GetPetResponse::from_http_response(ok)).expect("ok");
+    let decoded = futures_executor::block_on(GetPetResponse::parse_response(ok)).expect("ok");
     match decoded {
         GetPetResponse::Status200(p) => assert_eq!(p.name, "rex"),
         other => panic!("unexpected {other:?}"),
     }
 
-    let not_found = Response::builder()
+    let not_found = ::http::Response::builder()
         .status(404)
-        .body(Full::new(Bytes::new()))
+        .body(Body::empty())
         .unwrap();
-    let decoded = futures_executor::block_on(GetPetResponse::from_http_response(not_found));
+    let decoded = futures_executor::block_on(GetPetResponse::parse_response(not_found));
     assert!(matches!(decoded, Ok(GetPetResponse::Status404)));
 }
 
 #[test]
 fn response_unknown_status_errors() {
-    let resp = Response::builder()
+    let resp = ::http::Response::builder()
         .status(500)
-        .body(Full::new(Bytes::new()))
+        .body(Body::empty())
         .unwrap();
-    let decoded = futures_executor::block_on(GetPetResponse::from_http_response(resp));
+    let decoded = futures_executor::block_on(GetPetResponse::parse_response(resp));
     assert!(matches!(decoded, Err(DecodeError::UnexpectedStatus(_))));
 }

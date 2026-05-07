@@ -4,12 +4,23 @@
 //! `toac-build` crate emits Rust code at build time, and the generated
 //! code links against the types and traits defined here.
 //!
-//! The two body-transform traits — [`IntoHttpRequest`] and
-//! [`FromHttpResponse`] — plumb generated `{Op}Request` /
-//! `{Op}Response` values through any `http::Request` /
-//! `http::Response` transport. [`ApiClient`] wraps a
-//! [`tower::Service`] and adapts it to `Service<Op>`, so callers
-//! drive the API through typed operation values.
+//! The runtime pins a single pair of transport types — [`Request`] and
+//! [`Response`] — both parameterised over the erased [`body::Body`]
+//! defined in this crate. Every generated `{Op}Request` implements
+//! [`MakeRequest`] to encode itself into a [`Request`], and every
+//! generated `{Op}Response` implements [`ParseResponse`] to decode a
+//! [`Response`] into a typed variant. [`ApiClient`] wraps a
+//! [`tower::Service`] that speaks `Request → Response` and adapts it to
+//! `Service<Op>`, so callers drive the API through typed operation
+//! values.
+//!
+//! Because the body type is fixed, the inner transport just needs to
+//! accept a [`Request`] and return a [`Response`]. Adapting an arbitrary
+//! HTTP client (hyper, reqwest, etc.) usually means a single
+//! `tower::Service` layer that converts between the foreign body and
+//! [`body::Body`] — [`body::Body::new`] accepts any
+//! `http_body::Body<Data = Bytes>` whose error is convertible into
+//! [`BoxError`].
 
 use std::{
     future::Future,
@@ -18,27 +29,42 @@ use std::{
     task::{Context, Poll},
 };
 
-use http::{Request, Response};
-use http_body::Body;
+pub mod body;
+mod error;
+mod request;
+mod response;
 
-/// Converts a generated request value into an [`http::Request`] carrying
-/// the encoded body type `B`.
+pub use error::BoxError;
+pub use request::Request;
+pub use response::Response;
+
+/// Converts a generated request value into a [`Request`].
 ///
 /// Consumption (`self`) is intentional: values like request bodies are
-/// moved into the HTTP request without extra cloning.
-pub trait IntoHttpRequest<B: Body> {
-    /// Builds the HTTP request, substituting path template placeholders,
-    /// appending query parameters, setting header parameters, and
-    /// encoding the body.
-    fn into_http_request(self) -> impl Future<Output = http::Request<B>> + Send;
+/// moved into the HTTP request without extra cloning. Implementations
+/// substitute path template placeholders, append query parameters, set
+/// header parameters, and encode the body into [`body::Body`].
+pub trait MakeRequest {
+    /// Builds the HTTP request ready for the transport layer.
+    fn make_request(self) -> impl Future<Output = Request> + Send;
 }
 
-/// Decodes a generated response enum from an [`http::Response`] whose body
-/// has already been collected into `B` (typically [`bytes::Bytes`]).
+/// Decodes a generated response enum from any [`http::Response`] whose
+/// body frames carry [`bytes::Bytes`].
 ///
-/// Body collection is asynchronous and therefore left to the caller; the
-/// trait itself is synchronous so it can be used in non-async contexts.
-pub trait FromHttpResponse<B: Body>: Sized {
+/// The trait is deliberately not tied to [`Response`] (the runtime's
+/// canonical alias over [`body::Body`]): real transports return their
+/// own body types (`hyper::body::Incoming`, `reqwest::Body`, …), and the
+/// generated code only needs [`http_body::Body::Data`] to be
+/// [`bytes::Bytes`] to run the collect-then-dispatch pipeline. The
+/// method is generic over `B` so callers never have to insert a body
+/// adapter layer just to satisfy a `ParseResponse` impl.
+///
+/// Collecting the streaming body is the implementor's responsibility —
+/// generated code reads the body via [`http_body_util`] before
+/// dispatching on status. The trait returns an `impl Future` so the
+/// async boundary is explicit and the bound `+ Send` can be spelled out.
+pub trait ParseResponse: Sized {
     /// Decoding errors raised when the response does not match any known
     /// variant or when payload parsing fails.
     type Error: std::error::Error;
@@ -49,12 +75,15 @@ pub trait FromHttpResponse<B: Body>: Sized {
     ///
     /// Implementors return [`Self::Error`] for unknown status codes and
     /// payload decoding failures.
-    fn from_http_response(
-        response: http::Response<B>,
-    ) -> impl Future<Output = Result<Self, Self::Error>> + Send;
+    fn parse_response<B>(
+        response: ::http::Response<B>,
+    ) -> impl Future<Output = Result<Self, Self::Error>> + Send
+    where
+        B: http_body::Body<Data = ::bytes::Bytes> + Send + 'static,
+        B::Error: Into<BoxError>;
 }
 
-/// Shared error type used by every generated [`FromHttpResponse`] impl.
+/// Shared error type used by every generated [`ParseResponse`] impl.
 ///
 /// Kept simple on purpose: a mismatch on status is distinguished from a
 /// payload parse failure, and the rest bubbles up through the usual
@@ -68,10 +97,9 @@ pub enum DecodeError {
 
     /// Collecting the streaming response body failed.
     ///
-    /// The underlying error comes from the [`http_body::Body`]
-    /// implementation the caller provided.
+    /// Wraps the erased error reported by [`body::Body`].
     #[error("failed to read response body: {0}")]
-    BodyRead(#[source] Box<dyn std::error::Error + Send + Sync>),
+    BodyRead(#[source] BoxError),
 
     /// The response body could not be deserialised into the variant's
     /// payload type.
@@ -81,20 +109,13 @@ pub enum DecodeError {
 
 /// Couples a generated request type with its response enum.
 ///
-/// The request body type is pinned (each `{Op}Request` serialises into
-/// exactly one body shape), while the response body is left flexible:
-/// the response enum implements [`FromHttpResponse`] generically, so the
-/// same operation can drive any transport whose `tower::Service`
-/// produces a `Body` implementation.
-pub trait Operation: IntoHttpRequest<Self::RequestBody> {
-    /// The `http::Request` body type produced by
-    /// [`IntoHttpRequest::into_http_request`].
-    type RequestBody: Body + Send;
-
-    /// The response enum decoded from the raw HTTP response. It must
-    /// implement [`FromHttpResponse<RespBody>`] for the concrete
-    /// response-body type used by the transport, but that `RespBody` is
-    /// chosen on the call site by the [`ApiClient`]'s inner service.
+/// Both sides of the exchange use the fixed [`body::Body`] type, so this
+/// trait carries no body-related type parameters — it just links the
+/// request-side [`MakeRequest`] impl to the [`ParseResponse`] impl that
+/// decodes the matching response.
+pub trait Operation: MakeRequest {
+    /// The response enum produced by [`ParseResponse::parse_response`]
+    /// for this operation's [`Response`].
     type Response;
 }
 
@@ -117,9 +138,9 @@ pub enum CallError<TransportError> {
 
 /// Tower service that turns typed operation requests into HTTP exchanges.
 ///
-/// Holds an inner service `S` that speaks `http::Request<ReqBody>` →
-/// `http::Response<RespBody>` and a base URL used to resolve the relative
-/// URIs produced by [`IntoHttpRequest`] implementations.
+/// Holds an inner service `S` that speaks [`Request`] → [`Response`] and
+/// a base URL used to resolve the relative URIs produced by
+/// [`MakeRequest`] implementations.
 ///
 /// The client itself is `Clone` so it can be consumed by middleware like
 /// [`tower::ServiceExt::ready`] — provided the inner service is `Clone`.
@@ -128,7 +149,6 @@ pub struct ApiClient<S> {
     inner: S,
     base_url: Arc<str>,
 }
-
 impl<S> ApiClient<S> {
     /// Wraps `inner` with a base URL used to prefix every relative
     /// request URI. `base_url` is stored as-is; no trailing-slash
@@ -157,19 +177,16 @@ impl<S> ApiClient<S> {
     }
 }
 
-impl<S, Op, RespBody> tower::Service<Op> for ApiClient<S>
+impl<S, Op, B> tower::Service<Op> for ApiClient<S>
 where
     Op: Operation + Send + 'static,
-    Op::RequestBody: Send + 'static,
-    Op::Response: FromHttpResponse<RespBody> + Send + 'static,
-    <Op::Response as FromHttpResponse<RespBody>>::Error: Into<DecodeError> + Send + 'static,
-    RespBody: Body + Send + 'static,
-    S: tower::Service<Request<Op::RequestBody>, Response = Response<RespBody>>
-        + Clone
-        + Send
-        + 'static,
+    Op::Response: ParseResponse + Send + 'static,
+    <Op::Response as ParseResponse>::Error: Into<DecodeError> + Send + 'static,
+    S: tower::Service<Request, Response = ::http::Response<B>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Send + 'static,
+    B: http_body::Body<Data = ::bytes::Bytes> + Send + 'static,
+    B::Error: Into<BoxError>,
 {
     type Response = Op::Response;
     type Error = CallError<S::Error>;
@@ -188,10 +205,10 @@ where
         let mut inner = std::mem::replace(&mut self.inner, inner);
         let base_url = self.base_url.clone();
         Box::pin(async move {
-            let http_req = op.into_http_request().await;
+            let http_req = op.make_request().await;
             let http_req = prefix_base_url(http_req, &base_url);
             let http_resp = inner.call(http_req).await.map_err(CallError::Transport)?;
-            Op::Response::from_http_response(http_resp)
+            Op::Response::parse_response(http_resp)
                 .await
                 .map_err(|e| CallError::Decode(e.into()))
         })
@@ -200,7 +217,7 @@ where
 
 /// Prefixes the request's URI with `base_url` when the URI is relative
 /// (path-only). Absolute URIs pass through untouched.
-fn prefix_base_url<B>(req: Request<B>, base_url: &str) -> Request<B> {
+fn prefix_base_url(req: Request, base_url: &str) -> Request {
     let (mut parts, body) = req.into_parts();
     let uri = parts.uri.clone();
     if uri.scheme().is_some() {
@@ -328,6 +345,36 @@ impl<'de> serde::Deserialize<'de> for Base64String {
             <std::borrow::Cow<'de, str> as serde::Deserialize>::deserialize(deserializer)?;
         Self::decode(&encoded).map_err(D::Error::custom)
     }
+}
+
+/// Includes a generated client module produced by `toac_build::Builder`.
+///
+/// Pass the spec's *stem* — i.e. the file name without extension.
+/// `Builder::new("openapi.yml")` writes `$OUT_DIR/openapi.rs`, so on
+/// the consumer side you pair it with `toac::include_client!("openapi")`.
+///
+/// # Example
+///
+/// ```ignore
+/// // src/lib.rs
+/// toac::include_client!("openapi");
+/// ```
+///
+/// For multiple specs, wrap each call in its own module:
+///
+/// ```ignore
+/// pub mod pets {
+///     toac::include_client!("pets");
+/// }
+/// pub mod users {
+///     toac::include_client!("users");
+/// }
+/// ```
+#[macro_export]
+macro_rules! include_client {
+    ($stem:literal) => {
+        include!(concat!(env!("OUT_DIR"), "/", $stem, ".rs"));
+    };
 }
 
 #[cfg(all(test, feature = "base64"))]

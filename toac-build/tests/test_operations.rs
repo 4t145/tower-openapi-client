@@ -200,7 +200,7 @@ fn colliding_param_names_get_location_suffix() {
         rendered.contains("pub id_query: Option<String>"),
         "second id should be suffixed:\n{rendered}"
     );
-    // The wire name is applied inside IntoHttpRequest rather than via a
+    // The wire name is applied inside MakeRequest rather than via a
     // serde rename — the query rendering pushes the literal "id" key.
     assert!(
         rendered.contains("__path.push_str(\"id\")"),

@@ -6,8 +6,8 @@ resolver = "3"
 # - `compile-check` : private crate that runs the generator against a
 #                     fixture spec and compiles the result, so any
 #                     regression in emitted code surfaces as a build error
-# - `examples/petstore`: usage walkthrough on a real-world spec; opt-in
-members = ["toac", "toac-build", "compile-check", "examples/petstore"]
+# - `examples/*`    : usage walkthrough on a real-world spec; opt-in
+members = ["toac", "toac-build", "compile-check", "examples/*"]
 # Keep day-to-day `cargo test` / `cargo build` on the library + its
 # compile guard; the example is a `cargo run -p petstore-example` affair.
 default-members = ["toac", "toac-build", "compile-check"]
@@ -43,6 +43,7 @@ base64 = "0.22"
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
 futures-executor = "0.3"
+tokio = { version = "1", features = ["full"] }
 indoc = "2"
 prettyplease = "0.2"
 uuid = { version = "1", features = ["serde"] }

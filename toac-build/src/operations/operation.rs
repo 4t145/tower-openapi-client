@@ -63,7 +63,7 @@ impl<'a> Generator<'a> {
         let meta_item = build_metadata_impl(&request_ident, method, path, operation);
         self.store_unnamed(meta_item);
 
-        let request_impl = build_into_http_request_impl(
+        let request_impl = build_make_request_impl(
             &request_ident,
             method,
             path,
@@ -80,11 +80,10 @@ impl<'a> Generator<'a> {
             response_item,
         );
 
-        let response_impl = build_from_http_response_impl(&response_ident, &response_variants);
+        let response_impl = build_parse_response_impl(&response_ident, &response_variants);
         self.store_unnamed(response_impl);
 
-        let operation_impl =
-            build_operation_impl(&request_ident, &response_ident, body_slot.is_some());
+        let operation_impl = build_operation_impl(&request_ident, &response_ident);
         self.store_unnamed(operation_impl);
 
         Ok(())
@@ -378,7 +377,7 @@ fn disambiguate_field(
 /// Turns a [`ParamSlot`] into its struct field representation.
 ///
 /// The request struct is never serialised through `serde` — the wire
-/// name is applied at request-building time inside `IntoHttpRequest` —
+/// name is applied at request-building time inside `MakeRequest` —
 /// so no `#[serde(rename)]` attribute is emitted here.
 fn param_to_field(slot: &ParamSlot) -> syn::Field {
     let mut attrs: Vec<syn::Attribute> = Vec::new();
@@ -518,13 +517,12 @@ fn build_metadata_impl(
     }
 }
 
-/// Builds the runtime `IntoHttpRequest` impl for one operation.
+/// Builds the runtime `MakeRequest` impl for one operation.
 ///
-/// The output body type depends on whether the operation has a request
-/// body: JSON-ish body → [`http_body_util::Full<Bytes>`]; no body →
-/// [`http_body_util::Empty<Bytes>`]. URL rendering substitutes path
-/// template placeholders and appends any query parameters.
-fn build_into_http_request_impl(
+/// URL rendering substitutes path template placeholders and appends any
+/// query parameters. The body is JSON-encoded into [`toac::body::Body`]
+/// when present, or defaulted to [`toac::body::Body::empty`].
+fn build_make_request_impl(
     request_ident: &syn::Ident,
     method: &Method,
     path: &str,
@@ -532,25 +530,19 @@ fn build_into_http_request_impl(
     body: Option<&BodySlot>,
 ) -> syn::Item {
     let method_tokens = method_tokens(method);
-    let body_ty: syn::Type = if body.is_some() {
-        parse_quote!(::http_body_util::Full<::bytes::Bytes>)
-    } else {
-        parse_quote!(::http_body_util::Empty<::bytes::Bytes>)
-    };
 
     let path_rendering = render_path_statements(path, params);
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
     let body_tokens = render_body_statement(body);
-    let into_http_request = crate::constants::runtime_path("IntoHttpRequest");
+    let make_request = crate::constants::runtime_path("MakeRequest");
+    let request_ty = crate::constants::runtime_path("Request");
 
     parse_quote! {
-        impl #into_http_request<#body_ty>
-            for #request_ident
-        {
-            fn into_http_request(
+        impl #make_request for #request_ident {
+            fn make_request(
                 self,
-            ) -> impl ::std::future::Future<Output = ::http::Request<#body_ty>> + Send {
+            ) -> impl ::std::future::Future<Output = #request_ty> + Send {
                 async move {
                     let mut __path = ::std::string::String::new();
                     #path_rendering
@@ -571,41 +563,32 @@ fn build_into_http_request_impl(
 }
 
 /// Builds the runtime `Operation` impl that links a request type to its
-/// response enum. Picks the `RequestBody` associated type based on
-/// whether the operation has a body (`Full<Bytes>` vs `Empty<Bytes>`) —
-/// the choice must match [`build_into_http_request_impl`].
-fn build_operation_impl(
-    request_ident: &syn::Ident,
-    response_ident: &syn::Ident,
-    has_body: bool,
-) -> syn::Item {
-    let request_body_ty: syn::Type = if has_body {
-        parse_quote!(::http_body_util::Full<::bytes::Bytes>)
-    } else {
-        parse_quote!(::http_body_util::Empty<::bytes::Bytes>)
-    };
+/// response enum. The runtime uses [`toac::body::Body`] for every
+/// request, so the impl only needs to name the response enum.
+fn build_operation_impl(request_ident: &syn::Ident, response_ident: &syn::Ident) -> syn::Item {
     let operation_trait = crate::constants::runtime_path("Operation");
     parse_quote! {
         impl #operation_trait for #request_ident {
-            type RequestBody = #request_body_ty;
             type Response = #response_ident;
         }
     }
 }
 
-/// Builds the runtime `FromHttpResponse` impl for one operation.
+/// Builds the runtime `ParseResponse` impl for one operation.
 ///
-/// The impl is generic over any [`http_body::Body`] implementation: the
-/// body is collected inside the generated async method before status
-/// dispatch. Known statuses decode JSON into their variant payload;
-/// unmatched statuses map to [`DecodeError::UnexpectedStatus`] unless
-/// the operation declares a `default` response.
-fn build_from_http_response_impl(
+/// The impl consumes the fixed [`toac::Response`] and dispatches on
+/// status. The body is collected before dispatch only when at least one
+/// variant carries a JSON-decoded payload. Known statuses decode JSON
+/// into their variant payload; unmatched statuses map to
+/// [`DecodeError::UnexpectedStatus`] unless the operation declares a
+/// `default` response.
+fn build_parse_response_impl(
     response_ident: &syn::Ident,
     variants: &[ResponseVariant],
 ) -> syn::Item {
-    let from_http_response = crate::constants::runtime_path("FromHttpResponse");
+    let parse_response = crate::constants::runtime_path("ParseResponse");
     let decode_error = crate::constants::runtime_path("DecodeError");
+    let box_error = crate::constants::runtime_path("BoxError");
 
     let arms: Vec<proc_macro2::TokenStream> =
         variants.iter().filter_map(response_match_arm).collect();
@@ -651,11 +634,7 @@ fn build_from_http_response_impl(
                 use ::http_body_util::BodyExt;
                 BodyExt::collect(__body)
                     .await
-                    .map_err(|e| {
-                        #decode_error::BodyRead(
-                            ::std::boxed::Box::new(e),
-                        )
-                    })?
+                    .map_err(|e| #decode_error::BodyRead(::std::convert::Into::into(e)))?
                     .to_bytes()
             };
         }
@@ -666,20 +645,20 @@ fn build_from_http_response_impl(
     };
 
     parse_quote! {
-        impl<__B> #from_http_response<__B>
-            for #response_ident
-        where
-            __B: ::http_body::Body + ::std::marker::Send,
-            __B::Data: ::std::marker::Send,
-            __B::Error: ::std::error::Error + ::std::marker::Send + ::std::marker::Sync + 'static,
-        {
+        impl #parse_response for #response_ident {
             type Error = #decode_error;
 
-            fn from_http_response(
+            fn parse_response<__B>(
                 response: ::http::Response<__B>,
             ) -> impl ::std::future::Future<
                 Output = ::std::result::Result<Self, Self::Error>,
-            > + ::std::marker::Send {
+            > + ::std::marker::Send
+            where
+                __B: ::http_body::Body<Data = ::bytes::Bytes>
+                    + ::std::marker::Send
+                    + 'static,
+                __B::Error: ::std::convert::Into<#box_error>,
+            {
                 async move {
                     let (__parts, __body) = response.into_parts();
                     let __status = __parts.status;
@@ -819,9 +798,15 @@ fn render_one_header(slot: &ParamSlot) -> proc_macro2::TokenStream {
 }
 
 /// Tokens for the `.body(...)` expression fed into `http::request::Builder`.
+///
+/// Bodies are JSON-encoded into [`http_body_util::Full<Bytes>`] and then
+/// wrapped into [`toac::body::Body`] so every generated request carries
+/// the same concrete body type. Operations without a body use
+/// [`toac::body::Body::empty`].
 fn render_body_statement(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
+    let body_ty = crate::constants::runtime_body_path();
     let Some(body) = body else {
-        return quote! { ::http_body_util::Empty::<::bytes::Bytes>::new() };
+        return quote! { #body_ty::empty() };
     };
 
     let field = &body.ident;
@@ -830,7 +815,9 @@ fn render_body_statement(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
             {
                 let __bytes = ::serde_json::to_vec(&self.#field)
                     .expect("request body serialises to JSON");
-                ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
+                #body_ty::new(
+                    ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
+                )
             }
         }
     } else {
@@ -839,10 +826,12 @@ fn render_body_statement(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
                 ::std::option::Option::Some(__body) => {
                     let __bytes = ::serde_json::to_vec(__body)
                         .expect("request body serialises to JSON");
-                    ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
+                    #body_ty::new(
+                        ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
+                    )
                 }
                 ::std::option::Option::None => {
-                    ::http_body_util::Full::new(::bytes::Bytes::new())
+                    #body_ty::empty()
                 }
             }
         }

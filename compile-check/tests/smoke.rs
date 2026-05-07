@@ -13,12 +13,13 @@ use std::{
 };
 
 use bytes::Bytes;
-use http::{Request, Response};
-use http_body_util::{Empty, Full};
+use http_body_util::Full;
 use tower::{Service, ServiceExt};
 // `Service` only participates in the transport impl below; call sites
 // use `ServiceExt::oneshot`.
-use toac::{ApiClient, CallError, FromHttpResponse, IntoHttpRequest, Operation};
+use toac::{
+    ApiClient, CallError, MakeRequest, Operation, ParseResponse, Request, Response, body::Body,
+};
 use toac_compile_check::{
     components::{FormatSample, NewPet, Pet},
     operations::{CreatePetRequest, CreatePetResponse, GetPetRequest, GetPetResponse},
@@ -40,7 +41,7 @@ fn get_request_renders_uri() {
         limit: Some(10),
         x_trace: Some("t1".into()),
     };
-    let http_req = futures_executor::block_on(req.into_http_request());
+    let http_req = futures_executor::block_on(req.make_request());
     assert_eq!(http_req.method(), http::Method::GET);
     assert_eq!(http_req.uri().to_string(), "/pets/abc?limit=10");
     assert_eq!(
@@ -57,7 +58,7 @@ fn post_body_serialises_to_json() {
     let req = CreatePetRequest {
         body: NewPet { name: "rex".into() },
     };
-    let http_req = futures_executor::block_on(req.into_http_request());
+    let http_req = futures_executor::block_on(req.make_request());
     assert_eq!(http_req.method(), http::Method::POST);
 
     use http_body_util::BodyExt;
@@ -70,11 +71,13 @@ fn post_body_serialises_to_json() {
 
 #[test]
 fn get_response_decodes_200_and_404() {
-    let ok = Response::builder()
+    let ok = http::Response::builder()
         .status(200)
-        .body(Full::new(Bytes::from(r#"{"id":"abc","name":"rex"}"#)))
+        .body(Body::new(Full::new(Bytes::from(
+            r#"{"id":"abc","name":"rex"}"#,
+        ))))
         .unwrap();
-    let decoded = futures_executor::block_on(GetPetResponse::from_http_response(ok)).expect("ok");
+    let decoded = futures_executor::block_on(GetPetResponse::parse_response(ok)).expect("ok");
     match decoded {
         GetPetResponse::Status200(pet) => {
             assert_eq!(pet.id, "abc");
@@ -83,22 +86,24 @@ fn get_response_decodes_200_and_404() {
         other => panic!("expected 200, got {other:?}"),
     }
 
-    let not_found = Response::builder()
+    let not_found = http::Response::builder()
         .status(404)
-        .body(Full::new(Bytes::from(r#"{"message":"missing"}"#)))
+        .body(Body::new(Full::new(Bytes::from(
+            r#"{"message":"missing"}"#,
+        ))))
         .unwrap();
     let decoded =
-        futures_executor::block_on(GetPetResponse::from_http_response(not_found)).expect("ok");
+        futures_executor::block_on(GetPetResponse::parse_response(not_found)).expect("ok");
     assert!(matches!(decoded, GetPetResponse::Status404(_)));
 }
 
 #[test]
 fn unknown_status_falls_through_to_default() {
-    let resp = Response::builder()
+    let resp = http::Response::builder()
         .status(500)
-        .body(Full::new(Bytes::from(r#"{"message":"boom"}"#)))
+        .body(Body::new(Full::new(Bytes::from(r#"{"message":"boom"}"#))))
         .unwrap();
-    let decoded = futures_executor::block_on(GetPetResponse::from_http_response(resp)).expect("ok");
+    let decoded = futures_executor::block_on(GetPetResponse::parse_response(resp)).expect("ok");
     assert!(matches!(decoded, GetPetResponse::Default(_)));
 }
 
@@ -111,8 +116,8 @@ struct StaticTransport {
     body: Bytes,
 }
 
-impl Service<Request<Empty<Bytes>>> for StaticTransport {
-    type Response = Response<Full<Bytes>>;
+impl Service<Request> for StaticTransport {
+    type Response = Response;
     type Error = Infallible;
     type Future = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
@@ -122,14 +127,14 @@ impl Service<Request<Empty<Bytes>>> for StaticTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request<Empty<Bytes>>) -> Self::Future {
+    fn call(&mut self, req: Request) -> Self::Future {
         *self.last_uri.lock().unwrap() = Some(req.uri().clone());
         let status = self.status;
         let body = self.body.clone();
         Box::pin(async move {
-            Ok(Response::builder()
+            Ok(http::Response::builder()
                 .status(status)
-                .body(Full::new(body))
+                .body(Body::new(Full::new(body)))
                 .expect("valid response"))
         })
     }

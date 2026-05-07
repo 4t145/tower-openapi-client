@@ -1,191 +1,107 @@
-//! Petstore example: shows how to drive generated operation types
-//! through [`ApiClient`] with a tower transport.
+//! Petstore example: drives generated operation types against the real
+//! Swagger Petstore API (`https://petstore3.swagger.io/api/v3`) over a
+//! hyper HTTPS client built by [`client_util::client::build_https_client`].
 //!
-//! Running this binary doesn't touch the network — the transport is a
-//! hand-written stub that returns canned JSON, because the example is
-//! primarily about *the generated code's shape and ergonomics*. To
-//! point at a real server, swap `FakeTransport` for something like a
-//! `reqwest` adapter and pass the real base URL.
-//!
-//! Not every operation in the Petstore 3.1 spec is exercised here — a
-//! couple of fields are driven by JSON Schema `$id`/`$anchor` pointers
-//! that `oas3` 0.21 does not expose, and the generator falls those
-//! back to `serde_json::Value`. The ops we demo (`addPet`,
-//! `getPetById`, `updatePet`) touch only well-typed parts of the spec.
-
-use std::{
-    convert::Infallible,
-    task::{Context, Poll},
-};
-
-use bytes::Bytes;
-use http::{Request, Response};
-use http_body_util::{Empty, Full};
-use tower::{Service, ServiceExt};
-// `Service` is only needed for the `impl Service for FakeTransport`
-// blocks below; the call sites use `ServiceExt::oneshot` exclusively.
-use toac::{ApiClient, CallError, IntoHttpRequest};
+//! The transport is a `Service<Request, Response = http::Response<Incoming>>`
+//! — `ApiClient` now accepts that directly without a body-adapter
+//! layer.
 
 use petstore_example::{
     components::{Category, Pet, PetStatus},
     operations::{
         AddPetRequest, AddPetResponse, GetPetByIdRequest, GetPetByIdResponse, UpdatePetRequest,
+        UpdatePetResponse,
     },
 };
+use toac::ApiClient;
+use tower::ServiceExt;
+use tracing::{info, warn};
 
-/// Tower transport that hands out canned responses keyed by request
-/// path. Used instead of an HTTP client so the example stays self-
-/// contained.
-#[derive(Clone)]
-struct FakeTransport;
+/// Base URL used by every call below.
+const PETSTORE_BASE_URL: &str = "https://petstore3.swagger.io/api/v3";
 
-impl Service<Request<Empty<Bytes>>> for FakeTransport {
-    type Response = Response<Full<Bytes>>;
-    type Error = Infallible;
-    type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
-    >;
+/// Pet identifier used by the GET demo. Petstore seeds a handful of
+/// sample pets; `1` is the one their own UI uses.
+const SAMPLE_PET_ID: i64 = 1;
 
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
+/// ID that Petstore reliably answers with 404 — well outside the seeded
+/// range, so the server reports "pet not found".
+const MISSING_PET_ID: i64 = 999_999_999;
 
-    fn call(&mut self, req: Request<Empty<Bytes>>) -> Self::Future {
-        let path = req.uri().path().to_owned();
-        Box::pin(async move {
-            // The test server sits under `/api/v3`, so match on the
-            // trailing portion after stripping that prefix.
-            let suffix = path.rsplit_once("/pet/").map(|(_, tail)| tail);
-            let (status, body) = match suffix {
-                Some("1") => (
-                    200u16,
-                    r#"{"id":1,"name":"Buddy","photoUrls":["https://example.com/1.jpg"],"status":"available"}"#,
-                ),
-                Some("404") => (404, ""),
-                _ => (200, r#"{"id":999,"name":"fallback","photoUrls":[]}"#),
-            };
-            Ok(Response::builder()
-                .status(status)
-                .body(Full::new(Bytes::from(body)))
-                .expect("canned response"))
+/// HTTPS client built by `client_util`; concrete so the demo helpers
+/// don't need a trait-bound tangle.
+type HttpClient = client_util::client::HyperHttpsClient<toac::body::Body>;
+type PetstoreClient = ApiClient<HttpClient>;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
+    let http = client_util::client::build_https_client::<toac::body::Body>()?;
+    let client: PetstoreClient = ApiClient::new(http, PETSTORE_BASE_URL);
+
+    demo_get_pet(client.clone()).await;
+    demo_get_pet_missing(client.clone()).await;
+    demo_add_pet(client.clone()).await;
+    demo_update_pet(client).await;
+
+    Ok(())
+}
+
+/// GET /pet/{id} — typed round-trip for an existing pet.
+async fn demo_get_pet(client: PetstoreClient) {
+    info!(pet_id = SAMPLE_PET_ID, "GET /pet/{{id}}");
+    match client
+        .oneshot(GetPetByIdRequest {
+            pet_id: SAMPLE_PET_ID,
         })
-    }
-}
-
-/// Sibling transport for operations whose `IntoHttpRequest<Full<Bytes>>`
-/// emits a JSON body. The only thing that changes from `FakeTransport`
-/// is the request body type parameter.
-#[derive(Clone)]
-struct FakeJsonTransport;
-
-impl Service<Request<Full<Bytes>>> for FakeJsonTransport {
-    type Response = Response<Full<Bytes>>;
-    type Error = Infallible;
-    type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
-    >;
-
-    fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        Poll::Ready(Ok(()))
-    }
-
-    fn call(&mut self, req: Request<Full<Bytes>>) -> Self::Future {
-        let (parts, body) = req.into_parts();
-        let path = parts.uri.path().to_owned();
-        let method = parts.method.clone();
-        Box::pin(async move {
-            use http_body_util::BodyExt;
-            let body_bytes = body.collect().await.expect("collect fake body").to_bytes();
-            println!(
-                "  [fake server] received {method} {path} body={}",
-                String::from_utf8_lossy(&body_bytes),
-            );
-            // Echo the body back at 200, i.e. "created/updated".
-            Ok(Response::builder()
-                .status(200)
-                .body(Full::new(body_bytes))
-                .expect("canned response"))
-        })
-    }
-}
-
-fn main() {
-    futures_executor::block_on(run_demo());
-}
-
-async fn run_demo() {
-    let base_url = "https://petstore3.swagger.io/api/v3";
-
-    demo_inspect_request(base_url).await;
-    demo_get_pet(base_url).await;
-    demo_get_pet_missing(base_url).await;
-    demo_add_pet(base_url).await;
-    demo_update_pet(base_url).await;
-}
-
-/// What a generated request looks like when it hits the wire.
-async fn demo_inspect_request(base_url: &str) {
-    println!("--- inspect generated GET request ---");
-    let req = GetPetByIdRequest { pet_id: 1 };
-    let http_req = req.into_http_request().await;
-    println!("  method  = {}", http_req.method());
-    println!("  path    = {}", http_req.uri());
-    println!(
-        "  method const from metadata impl: {}",
-        GetPetByIdRequest::METHOD
-    );
-    println!(
-        "  path template from metadata impl: {}",
-        GetPetByIdRequest::PATH_TEMPLATE,
-    );
-    // Path is relative; `ApiClient` is what prefixes base_url. Show it
-    // for completeness.
-    println!("  (ApiClient would dispatch this under {base_url})");
-    println!();
-}
-
-/// Full round-trip with ApiClient for an existing pet.
-async fn demo_get_pet(base_url: &str) {
-    println!("--- GET /pet/1 (ApiClient end-to-end) ---");
-    let client = ApiClient::new(FakeTransport, base_url);
-    // `oneshot` is provided by `tower::ServiceExt`: it does
-    // `poll_ready` + `call` in one step and consumes the client, so
-    // the request value on its own nails down which `Service<Op>`
-    // impl we're using. No turbofish needed.
-    let outcome = client.oneshot(GetPetByIdRequest { pet_id: 1 }).await;
-
-    match outcome {
+        .await
+    {
         Ok(GetPetByIdResponse::Status200(pet)) => {
-            println!("  decoded 200 Pet: id={:?} name={:?}", pet.id, pet.name);
+            info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet fetched");
         }
-        Ok(other) => println!("  unexpected response variant: {other:?}"),
+        Ok(GetPetByIdResponse::Status400) => info!("server reported 400 invalid id"),
+        Ok(GetPetByIdResponse::Status404) => info!("pet not found"),
+        Ok(GetPetByIdResponse::Default) => {
+            info!("server returned unspecified status (default variant)");
+        }
         Err(err) => report_call_error("getPetById", &err),
     }
-    println!();
 }
 
-/// Same op, missing pet — should round-trip to `Status404`.
-async fn demo_get_pet_missing(base_url: &str) {
-    println!("--- GET /pet/404 (not found) ---");
-    let client = ApiClient::new(FakeTransport, base_url);
-    let outcome = client.oneshot(GetPetByIdRequest { pet_id: 404 }).await;
-
-    match outcome {
-        Ok(GetPetByIdResponse::Status404) => {
-            println!("  observed 404 as expected");
+/// GET /pet/{id} against an id outside the seeded range — expect 404.
+async fn demo_get_pet_missing(client: PetstoreClient) {
+    info!(pet_id = MISSING_PET_ID, "GET /pet/{{id}} (expecting 404)");
+    match client
+        .oneshot(GetPetByIdRequest {
+            pet_id: MISSING_PET_ID,
+        })
+        .await
+    {
+        Ok(GetPetByIdResponse::Status200(pet)) => {
+            warn!(id = ?pet.id, "unexpected 200 for missing id");
         }
-        Ok(other) => println!("  unexpected variant: {other:?}"),
+        Ok(GetPetByIdResponse::Status400) => info!("server reported 400 invalid id"),
+        Ok(GetPetByIdResponse::Status404) => info!("observed 404 as expected"),
+        Ok(GetPetByIdResponse::Default) => {
+            info!("server returned unspecified status (default variant)");
+        }
         Err(err) => report_call_error("getPetById", &err),
     }
-    println!();
 }
 
-/// POST with a JSON body, demonstrating request body serialisation.
-async fn demo_add_pet(base_url: &str) {
-    println!("--- POST /pet (addPet) ---");
+/// POST /pet — create a new pet. Petstore usually answers 200 with the
+/// created pet echoed back.
+async fn demo_add_pet(client: PetstoreClient) {
+    info!("POST /pet");
     let request = AddPetRequest {
         body: Pet {
-            id: Some(42),
+            id: None,
             name: "Milo".into(),
             photo_urls: vec!["https://example.com/milo.jpg".into()],
             status: Some(PetStatus::Available),
@@ -195,35 +111,29 @@ async fn demo_add_pet(base_url: &str) {
             }),
             tags: None,
             available_instances: None,
-            // The fields below come out as `serde_json::Value` because
-            // their source `$ref` uses JSON Schema `$id`, which oas3
-            // 0.21 doesn't surface. Leaving them as JSON null keeps the
-            // generated type usable without forcing the user to reach
-            // for the fallback shape.
             pet_details: None,
             pet_details_id: None,
         },
     };
 
-    let client = ApiClient::new(FakeJsonTransport, base_url);
-    let outcome = client.oneshot(request).await;
-
-    match outcome {
+    match client.oneshot(request).await {
         Ok(AddPetResponse::Status200(pet)) => {
-            println!("  server echoed back Pet: name={:?}", pet.name);
+            info!(id = ?pet.id, name = %pet.name, "pet created");
         }
-        Ok(other) => println!("  unexpected variant: {other:?}"),
+        Ok(AddPetResponse::Status405) => info!("server reported 405 invalid input"),
+        Ok(AddPetResponse::Default) => {
+            info!("server returned unspecified status (default variant)");
+        }
         Err(err) => report_call_error("addPet", &err),
     }
-    println!();
 }
 
-/// PUT: near-identical to addPet but distinct operation + response enum.
-async fn demo_update_pet(base_url: &str) {
-    println!("--- PUT /pet (updatePet) ---");
+/// PUT /pet — mirrors addPet but distinct operation + response enum.
+async fn demo_update_pet(client: PetstoreClient) {
+    info!("PUT /pet");
     let request = UpdatePetRequest {
         body: Pet {
-            id: Some(42),
+            id: Some(SAMPLE_PET_ID),
             name: "Milo-updated".into(),
             photo_urls: vec![],
             status: Some(PetStatus::Sold),
@@ -235,19 +145,27 @@ async fn demo_update_pet(base_url: &str) {
         },
     };
 
-    let client = ApiClient::new(FakeJsonTransport, base_url);
-    let outcome = client.oneshot(request).await;
-
-    match outcome {
-        Ok(resp) => println!("  response variant: {resp:?}"),
+    match client.oneshot(request).await {
+        Ok(UpdatePetResponse::Status200(pet)) => {
+            info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet updated");
+        }
+        Ok(UpdatePetResponse::Status400) => info!("server reported 400 invalid id"),
+        Ok(UpdatePetResponse::Status404) => info!("pet not found"),
+        Ok(UpdatePetResponse::Status405) => info!("server reported 405 validation exception"),
+        Ok(UpdatePetResponse::Default) => {
+            info!("server returned unspecified status (default variant)");
+        }
         Err(err) => report_call_error("updatePet", &err),
     }
-    println!();
 }
 
-fn report_call_error<E: std::fmt::Display>(op: &str, err: &CallError<E>) {
+/// Logs a [`toac::CallError`] at `warn`. Transport failures (DNS, TLS,
+/// timeouts) and decode failures (unexpected status / bad payload) are
+/// genuine errors the caller should surface — unlike the declared
+/// non-2xx statuses, which are routed through the typed response enum.
+fn report_call_error<E: std::fmt::Display>(op: &str, err: &toac::CallError<E>) {
     match err {
-        CallError::Transport(e) => println!("  {op} transport error: {e}"),
-        CallError::Decode(e) => println!("  {op} decode error: {e}"),
+        toac::CallError::Transport(e) => warn!(op, error = %e, "transport error"),
+        toac::CallError::Decode(e) => warn!(op, error = %e, "decode error"),
     }
 }

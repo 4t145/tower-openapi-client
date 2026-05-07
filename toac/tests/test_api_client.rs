@@ -1,6 +1,6 @@
 //! End-to-end exercise of [`ApiClient`]: wraps a hand-written
-//! `tower::Service` that speaks `http::Request` / `http::Response`, then
-//! drives it through typed operation values.
+//! `tower::Service` that speaks [`toac::Request`] / [`toac::Response`],
+//! then drives it through typed operation values.
 //!
 //! The trait signatures need `impl Future + Send` bounds that `async fn`
 //! can't spell on its own.
@@ -14,9 +14,12 @@ use std::{
 };
 
 use ::bytes::Bytes;
-use ::http::{Method, Request, Response};
-use ::http_body_util::{BodyExt, Empty, Full};
-use ::toac::{ApiClient, CallError, DecodeError, FromHttpResponse, IntoHttpRequest, Operation};
+use ::http::Method;
+use ::http_body_util::{BodyExt, Full};
+use ::toac::{
+    ApiClient, BoxError, CallError, DecodeError, MakeRequest, Operation, ParseResponse, Request,
+    Response, body::Body,
+};
 use ::tower::{Service, ServiceExt};
 
 // ---------------------------------------------------------------------------
@@ -28,16 +31,14 @@ struct GetPetRequest {
     id: String,
 }
 
-impl IntoHttpRequest<Empty<Bytes>> for GetPetRequest {
-    fn into_http_request(
-        self,
-    ) -> impl ::std::future::Future<Output = Request<Empty<Bytes>>> + Send {
+impl MakeRequest for GetPetRequest {
+    fn make_request(self) -> impl ::std::future::Future<Output = Request> + Send {
         async move {
             let uri = format!("/pets/{}", self.id);
-            Request::builder()
+            ::http::Request::builder()
                 .method(Method::GET)
                 .uri(uri)
-                .body(Empty::new())
+                .body(Body::empty())
                 .expect("valid request")
         }
     }
@@ -55,24 +56,23 @@ enum GetPetResponse {
     Status404,
 }
 
-impl<B> FromHttpResponse<B> for GetPetResponse
-where
-    B: ::http_body::Body + Send,
-    B::Data: Send,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+impl ParseResponse for GetPetResponse {
     type Error = DecodeError;
 
-    fn from_http_response(
-        response: Response<B>,
-    ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send {
+    fn parse_response<B>(
+        response: ::http::Response<B>,
+    ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send
+    where
+        B: ::http_body::Body<Data = Bytes> + Send + 'static,
+        B::Error: Into<BoxError>,
+    {
         async move {
             let (parts, body) = response.into_parts();
             match parts.status.as_u16() {
                 200 => {
                     let bytes = BodyExt::collect(body)
                         .await
-                        .map_err(|e| DecodeError::BodyRead(Box::new(e)))?
+                        .map_err(|e| DecodeError::BodyRead(e.into()))?
                         .to_bytes();
                     let pet = ::serde_json::from_slice(bytes.as_ref())?;
                     Ok(Self::Status200(pet))
@@ -85,7 +85,6 @@ where
 }
 
 impl Operation for GetPetRequest {
-    type RequestBody = Empty<Bytes>;
     type Response = GetPetResponse;
 }
 
@@ -111,8 +110,8 @@ impl RecordingTransport {
     }
 }
 
-impl Service<Request<Empty<Bytes>>> for RecordingTransport {
-    type Response = Response<Full<Bytes>>;
+impl Service<Request> for RecordingTransport {
+    type Response = Response;
     type Error = Infallible;
     type Future = std::pin::Pin<
         Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
@@ -122,14 +121,14 @@ impl Service<Request<Empty<Bytes>>> for RecordingTransport {
         Poll::Ready(Ok(()))
     }
 
-    fn call(&mut self, req: Request<Empty<Bytes>>) -> Self::Future {
+    fn call(&mut self, req: Request) -> Self::Future {
         *self.last_uri.lock().unwrap() = Some(req.uri().clone());
         let status = self.canned_status;
         let body = self.canned_body.clone();
         Box::pin(async move {
-            Ok(Response::builder()
+            Ok(::http::Response::builder()
                 .status(status)
-                .body(Full::new(body))
+                .body(Body::new(Full::new(body)))
                 .expect("valid response"))
         })
     }
@@ -182,8 +181,8 @@ fn transport_error_is_wrapped() {
     // A transport that always fails with a string error.
     #[derive(Clone)]
     struct AlwaysFails;
-    impl Service<Request<Empty<Bytes>>> for AlwaysFails {
-        type Response = Response<Full<Bytes>>;
+    impl Service<Request> for AlwaysFails {
+        type Response = Response;
         type Error = &'static str;
         type Future = std::pin::Pin<
             Box<dyn std::future::Future<Output = Result<Self::Response, Self::Error>> + Send>,
@@ -191,7 +190,7 @@ fn transport_error_is_wrapped() {
         fn poll_ready(&mut self, _: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
             Poll::Ready(Ok(()))
         }
-        fn call(&mut self, _req: Request<Empty<Bytes>>) -> Self::Future {
+        fn call(&mut self, _req: Request) -> Self::Future {
             Box::pin(async { Err("boom") })
         }
     }

@@ -12,8 +12,11 @@ quote = { workspace = true }
 syn = { workspace = true }
 thiserror = { workspace = true }
 serde_json = { workspace = true }
+# Used by the `Builder` convenience API to pretty-print generated code
+# before it hits `$OUT_DIR`, so compile errors in generated output
+# surface with readable line numbers.
+prettyplease = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
 indoc = { workspace = true }
-prettyplease = { workspace = true }

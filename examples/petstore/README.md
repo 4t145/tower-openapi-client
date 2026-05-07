@@ -15,7 +15,7 @@ cargo run -p petstore-example
 
 | Scenario               | Code path                                                   |
 |------------------------|-------------------------------------------------------------|
-| Inspecting a request   | `GetPetByIdRequest::into_http_request()` + metadata consts  |
+| Inspecting a request   | `GetPetByIdRequest::make_request()` + metadata consts  |
 | 200 round-trip         | `ApiClient<_>::call(GetPetByIdRequest)` → typed `Pet`       |
 | 404 branch             | Same op, returns `GetPetByIdResponse::Status404`            |
 | POST with JSON body    | `AddPetRequest { body: Pet { ... } }` (serialised via serde)|
@@ -52,20 +52,24 @@ feature for `Base64String`.
 ### `build.rs`
 
 ```rust
-let spec = oas3::from_json(&fs::read_to_string(spec_path)?)?;
-let opts = toac_build::BuildOptions {
-    use_chrono: true,
-    use_uuid: true,
-    use_base64_string: true,
-};
-let tokens = toac_build::build_with(&spec, opts)?;
-fs::write(concat!(env!("OUT_DIR"), "/generated.rs"), tokens)?;
+fn main() {
+    toac_build::Builder::new("path/to/openapi.yml")
+        .use_chrono(true)
+        .use_uuid(true)
+        .use_base64_string(true)
+        .emit();
+}
 ```
+
+The builder reads the spec, parses it (picking the right parser from
+the extension), pretty-prints the output, and writes
+`$OUT_DIR/<stem>.rs`. Pass `.output_file_name("something.rs")` to
+override the derived name.
 
 ### `src/lib.rs`
 
 ```rust
-include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+toac::include_client!("openapi");  // pairs with `openapi.yml` → `openapi.rs`
 ```
 
 That's it. The rest of `src/main.rs` is usage code — constructing

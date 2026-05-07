@@ -1,6 +1,6 @@
 //! Library surface for the example binary. It consists entirely of the
-//! generator's output included from `$OUT_DIR/generated.rs`, which in
-//! turn is produced by `build.rs` from the real Petstore spec.
+//! generator's output included through `toac::include_client!`, which
+//! in turn is produced by `build.rs` from the real Petstore spec.
 //!
 //! The `#![allow(...)]` list silences stylistic lints against generated
 //! code that would otherwise mask the signal from the example itself.
@@ -15,4 +15,4 @@
     dead_code
 )]
 
-include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+toac::include_client!("petstore");

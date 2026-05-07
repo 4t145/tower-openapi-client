@@ -27,3 +27,10 @@ pub fn runtime_path(item: &str) -> syn::Path {
 pub fn runtime_crate_ident() -> syn::Ident {
     syn::Ident::new(RUNTIME_CRATE, Span::call_site())
 }
+
+/// Path to [`toac::body::Body`], the fixed body type used on every
+/// generated request.
+pub fn runtime_body_path() -> syn::Path {
+    let crate_ident = syn::Ident::new(RUNTIME_CRATE, Span::call_site());
+    parse_quote!(::#crate_ident::body::Body)
+}
