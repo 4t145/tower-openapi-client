@@ -34,3 +34,11 @@ pub fn runtime_body_path() -> syn::Path {
     let crate_ident = syn::Ident::new(RUNTIME_CRATE, Span::call_site());
     parse_quote!(::#crate_ident::body::Body)
 }
+
+/// Builds a `::<RUNTIME_CRATE>::body::codec::<suffix>` path. Accepts a
+/// dotted suffix like `"json::JsonEncoder"` so callers don't have to
+/// compose `syn::Path` segments themselves.
+pub fn runtime_body_codec_path(suffix: &str) -> syn::Path {
+    let full = format!("::{RUNTIME_CRATE}::body::codec::{suffix}");
+    syn::parse_str::<syn::Path>(&full).expect("valid codec path")
+}

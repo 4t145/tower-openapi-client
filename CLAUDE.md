@@ -1,42 +1,4 @@
-## 任务目标
 
-这个仓库的任务是把OAS3库（https://docs.rs/oas3/latest/oas3/）中已经完成解析的结构体，变成Tower兼容的客户端结构。我们最终的目标是，能够让这个客户端完美访问对应的服务端。
-
-### `oas3::Spec` 到 `TokenStream` 的转换
-为了实现这个目标，首要任务就是编写一个转换器，能够完成`oas3::Spec` 到 `TokenStream` 的转换
-
-一般来说，对于spec中的description字符串，我们要转换成rust中的`\\\`文档
-
-
-### OAS 对象与 rust 项目的对应
-首先生成的代码会提供一个`ApiClient<S>`类型，在这个类型可以作为一个`Layer`，把用户可能传入的`HttpClient`(也就是泛型`S`)包装成一个可用的API客户端。
-
-#### servers
-servers 中不同的server应该作为 ApiClient Layer 的一个可以配置的选项。其中schema中提供的所有提供的server中的一项，应该作为一个类型提供，如果这个Server有变量，那么就是一个具有字段的结构体。
-最后，所有的可选server作为一个Enum类型提供，作为ApiClient Layer 的一个可以配置的选项。
-##### Server的命名规则
-作为类型的名字，默认命名为`ServerOption{#index}`，如`ServerOption0`，`ServerOption1`。
-
-#### path
-我们最终应该是，能把服务中声明的每一个API（也就是OAS中的Path），能对应一个rust中的`{api_name}ApiRequest`类型，然后我们会给Client实现`Service<{api_name}ApiRequest>`。并且在client上提供一个叫`{api_name}`的方法
-让用户比较方便的调用
-
-#### webhook
-待定
-
-#### components
-每一个Component应该对应Rust中的一个类型，这些类型要能够适当的转换为Component中要求的编码结构
-
-
-
-#### security
-待定
-
-#### tags
-每个 tag 生成一个 mod 作为归类
-
-#### externalDocs
-externalDocs要转化为文件的顶层`!\\`文档
 
 ## 人机交互
 你是一个INTJ性格的工程专家，专注于编写高质量、可维护的 Rust 代码。你对编码规范有严格的要求，并且在工作流程中坚持使用工具来确保代码质量。你喜欢简洁明了的沟通方式，避免画蛇添足的解释和不必要的细节。
@@ -71,6 +33,7 @@ externalDocs要转化为文件的顶层`!\\`文档
    - 始终使用 Rust 2024 的惯用写法
 7. **字符串处理优先使用函数调用而非切片**：优先使用 `str::split`、`str::trim`、`str::strip_prefix` 等方法，而不是通过索引切片。例如，用 `s.strip_prefix("xxx")` 代替 `s.starts_with("xxx").then_some(&s[0..3])`，更健壮、意图更清晰。
 8. 按照`<submodule>/` + `<submodule>.rs`的方式组织子mod，而**不用**`mod.rs`来组织。
+9. 不要造轮子。如果社区对于一些东西已经有了成熟的实现，那就不要自己写一个半成品。
 
 ## 工作流程
 

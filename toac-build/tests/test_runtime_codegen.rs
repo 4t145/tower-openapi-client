@@ -53,12 +53,22 @@ fn make_request_emitted_for_get_with_path_and_query() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains("impl ::toac::MakeRequest for GetPetRequest"),
+        compact.contains("impl ::toac::MakeRequest for Request"),
         "MakeRequest impl (non-generic) not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
     assert!(
-        compact.contains("Output = ::toac::Request"),
-        "make_request future output not ::toac::Request:\n{rendered}"
+        compact.contains("pub mod pets")
+            && compact.contains("pub mod by_id")
+            && compact.contains("pub mod get"),
+        "op not emitted under operations::pets::by_id::get:\n{rendered}"
+    );
+    assert!(
+        compact.contains("Output = ::std::result::Result<::toac::Request, Self::Error>"),
+        "make_request future output not Result<::toac::Request, Self::Error>:\n{rendered}"
+    );
+    assert!(
+        compact.contains("type Error = ::std::convert::Infallible"),
+        "no-body operation should have Infallible Error:\n{rendered}"
     );
     assert!(
         compact.contains("fn make_request(self)"),
@@ -121,17 +131,22 @@ fn make_request_wraps_body_for_post() {
                   description: created
     "##});
 
+    let compact = compact(&rendered);
     assert!(
-        rendered.contains("::toac::body::Body::new"),
-        "body not wrapped through toac::body::Body::new:\n{rendered}"
+        compact.contains("::toac::body::codec::encode_body"),
+        "body not encoded via codec::encode_body:\n{rendered}"
     );
     assert!(
-        rendered.contains("::http_body_util::Full::new"),
-        "Full<Bytes> inner body not used:\n{rendered}"
+        compact.contains("::toac::body::codec::json::JsonEncoder"),
+        "JSON encoder not selected:\n{rendered}"
     );
     assert!(
-        rendered.contains("::serde_json::to_vec(&self.body)"),
-        "body field not JSON-serialised:\n{rendered}"
+        compact.contains("&self.body"),
+        "body field not referenced:\n{rendered}"
+    );
+    assert!(
+        compact.contains("type Error = ::serde_json::Error"),
+        "JSON-body operation should propagate serde_json::Error:\n{rendered}"
     );
 }
 
@@ -171,7 +186,7 @@ fn parse_response_dispatches_on_status() {
 
     let compact = compact(&rendered);
     assert!(
-        compact.contains("impl ::toac::ParseResponse for GetPetResponse"),
+        compact.contains("impl ::toac::ParseResponse for Response"),
         "ParseResponse impl not found:\ncompact:\n{compact}\nrendered:\n{rendered}"
     );
     assert!(
@@ -197,13 +212,21 @@ fn parse_response_dispatches_on_status() {
     );
     // default is the fallback variant
     assert!(
-        rendered.contains("GetPetResponse::Default"),
+        rendered.contains("Response::Default"),
         "default fallback missing:\n{rendered}"
     );
-    // 200 with schema decodes JSON
+    // 200 with schema decodes via the codec
     assert!(
-        rendered.contains("::serde_json::from_slice(__bytes.as_ref())"),
-        "JSON decode not emitted:\n{rendered}"
+        compact.contains("::toac::body::codec::decode_body"),
+        "body not decoded via codec::decode_body:\n{rendered}"
+    );
+    assert!(
+        compact.contains("::toac::body::codec::json::JsonDecoder"),
+        "JSON decoder not selected:\n{rendered}"
+    );
+    assert!(
+        compact.contains("::toac::DecodeError::Codec"),
+        "codec error not wrapped via DecodeError::Codec:\n{rendered}"
     );
 }
 
@@ -238,14 +261,17 @@ fn component_refs_from_operations_are_qualified() {
     "##});
 
     // The `Pet` variant payload inside the operations module must point
-    // back at the components module or it won't compile.
+    // back at the components module through the absolute `crate::`
+    // path — operations are nested several levels deep under
+    // `operations::<path>::<method>`, so a relative `super::` path
+    // would have to vary per op.
     assert!(
-        rendered.contains("super::components::Pet"),
-        "component reference in operations module not qualified:\n{rendered}"
+        rendered.contains("crate::components::Pet"),
+        "component reference should use crate::components::...:\n{rendered}"
     );
     // Local types like the op's own response enum must NOT be rewritten.
     assert!(
-        rendered.contains("pub enum GetPetResponse"),
+        rendered.contains("pub enum Response"),
         "response enum ident mangled:\n{rendered}"
     );
 }
@@ -286,23 +312,29 @@ fn operation_impl_emitted_for_each_operation() {
     let compact = compact(&rendered);
 
     // Both operations share the same Operation trait with no body-type
-    // associated type; they only bind the response enum.
+    // associated type; they only bind the response enum. Each op's
+    // `Request` / `Response` types live in their own path-derived mod,
+    // so the `impl` block references them by the unqualified local
+    // names inside that mod.
     assert!(
-        compact.contains("impl ::toac::Operation for PingRequest"),
-        "PingRequest Operation impl missing:\ncompact:\n{compact}"
+        compact.contains("pub mod ping"),
+        "ping method mod missing:\n{rendered}"
     );
     assert!(
-        compact.contains("type Response = PingResponse"),
-        "Ping Response type not bound:\n{rendered}"
+        compact.contains("pub mod pets") && compact.contains("pub mod post"),
+        "createPet mod structure missing:\n{rendered}"
     );
-
-    assert!(
-        compact.contains("impl ::toac::Operation for CreatePetRequest"),
-        "CreatePetRequest Operation impl missing:\n{rendered}"
+    // The impl block is emitted inside each op's mod with local names.
+    let operation_impl_count = compact
+        .matches("impl ::toac::Operation for Request")
+        .count();
+    assert_eq!(
+        operation_impl_count, 2,
+        "expected one Operation impl per op, got {operation_impl_count}:\n{rendered}"
     );
     assert!(
-        compact.contains("type Response = CreatePetResponse"),
-        "CreatePet Response type not bound:\n{rendered}"
+        compact.matches("type Response = Response").count() >= 2,
+        "each op should bind `type Response = Response`:\n{rendered}"
     );
 
     // RequestBody associated type is gone.

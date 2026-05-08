@@ -8,14 +8,20 @@
 
 use petstore_example::{
     components::{Category, Pet, PetStatus},
-    operations::{
-        AddPetRequest, AddPetResponse, GetPetByIdRequest, GetPetByIdResponse, UpdatePetRequest,
-        UpdatePetResponse,
-    },
+    operations::pet::{by_pet_id::get as get_pet, post as add_pet, put as update_pet},
 };
 use toac::ApiClient;
 use tower::ServiceExt;
 use tracing::{info, warn};
+
+// Local aliases keep the call sites below readable while delegating to
+// the path-module types the generator now emits.
+type GetPetByIdRequest = get_pet::Request;
+type GetPetByIdResponse = get_pet::Response;
+type AddPetRequest = add_pet::Request;
+type AddPetResponse = add_pet::Response;
+type UpdatePetRequest = update_pet::Request;
+type UpdatePetResponse = update_pet::Response;
 
 /// Base URL used by every call below.
 const PETSTORE_BASE_URL: &str = "https://petstore3.swagger.io/api/v3";
@@ -165,6 +171,8 @@ async fn demo_update_pet(client: PetstoreClient) {
 /// non-2xx statuses, which are routed through the typed response enum.
 fn report_call_error<E: std::fmt::Display>(op: &str, err: &toac::CallError<E>) {
     match err {
+        toac::CallError::Encode(e) => warn!(op, error = %e, "encode error"),
+        toac::CallError::Auth(e) => warn!(op, error = %e, "auth error"),
         toac::CallError::Transport(e) => warn!(op, error = %e, "transport error"),
         toac::CallError::Decode(e) => warn!(op, error = %e, "decode error"),
     }

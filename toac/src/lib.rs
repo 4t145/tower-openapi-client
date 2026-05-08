@@ -33,20 +33,36 @@ pub mod body;
 mod error;
 mod request;
 mod response;
+pub mod security;
+mod server;
 
 pub use error::BoxError;
 pub use request::Request;
 pub use response::Response;
+pub use security::{AuthSelector, NoAuth, OperationSecurity, SecurityCredential};
+pub use server::{Server, WithServer};
 
 /// Converts a generated request value into a [`Request`].
 ///
 /// Consumption (`self`) is intentional: values like request bodies are
 /// moved into the HTTP request without extra cloning. Implementations
 /// substitute path template placeholders, append query parameters, set
-/// header parameters, and encode the body into [`body::Body`].
+/// header parameters, and encode the body through a
+/// [`body::codec::BodyEncoder`].
+///
+/// Encoding is fallible because a user-supplied payload may fail to
+/// serialise (e.g. a map with non-string keys under JSON). URI / header
+/// construction is infallible by construction in generated code.
 pub trait MakeRequest {
+    /// Encoding errors produced by [`MakeRequest::make_request`].
+    type Error: std::error::Error + Send + Sync + 'static;
+
     /// Builds the HTTP request ready for the transport layer.
-    fn make_request(self) -> impl Future<Output = Request> + Send;
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Self::Error`] when request body encoding fails.
+    fn make_request(self) -> impl Future<Output = Result<Request, Self::Error>> + Send;
 }
 
 /// Decodes a generated response enum from any [`http::Response`] whose
@@ -85,9 +101,14 @@ pub trait ParseResponse: Sized {
 
 /// Shared error type used by every generated [`ParseResponse`] impl.
 ///
-/// Kept simple on purpose: a mismatch on status is distinguished from a
-/// payload parse failure, and the rest bubbles up through the usual
-/// [`std::error::Error`] plumbing.
+/// Split into the two failure modes that live at different levels:
+/// [`DecodeError::UnexpectedStatus`] never touches a codec (it happens
+/// during status dispatch) while [`DecodeError::Codec`] covers
+/// everything the codec raises — body read failures, payload
+/// deserialisation failures, and whatever else a future codec
+/// surfaces — erased into a [`BoxError`] so the enum stays stable as
+/// new codecs land. Callers who need the concrete codec error can
+/// downcast the inner value.
 #[derive(Debug, thiserror::Error)]
 pub enum DecodeError {
     /// The response's status code matches none of the statuses declared
@@ -95,16 +116,9 @@ pub enum DecodeError {
     #[error("unexpected HTTP status: {0}")]
     UnexpectedStatus(http::StatusCode),
 
-    /// Collecting the streaming response body failed.
-    ///
-    /// Wraps the erased error reported by [`body::Body`].
-    #[error("failed to read response body: {0}")]
-    BodyRead(#[source] BoxError),
-
-    /// The response body could not be deserialised into the variant's
-    /// payload type.
-    #[error("failed to decode response body: {0}")]
-    Deserialize(#[from] serde_json::Error),
+    /// The selected codec failed while decoding the response body.
+    #[error("codec error: {0}")]
+    Codec(#[source] BoxError),
 }
 
 /// Couples a generated request type with its response enum.
@@ -121,10 +135,25 @@ pub trait Operation: MakeRequest {
 
 /// Errors raised by [`ApiClient`]'s `Service::call`.
 ///
-/// Keeps transport failures distinct from payload decoding failures so
-/// callers can act on them without string-matching.
+/// Keeps request-encoding, auth, transport, and response-decoding
+/// failures distinct so callers can act on them without string-matching.
+/// Only the transport error is kept as a generic — every other failure
+/// erases into [`BoxError`] or [`DecodeError`], so cross-operation
+/// handlers don't have to name codec- or scheme-specific types.
 #[derive(Debug, thiserror::Error)]
 pub enum CallError<TransportError> {
+    /// The operation's [`MakeRequest`] impl failed to encode the
+    /// request body. Downcast the inner [`BoxError`] to recover the
+    /// codec's concrete error.
+    #[error("encode error: {0}")]
+    Encode(#[source] BoxError),
+
+    /// The [`AuthSelector`] could not satisfy the operation's security
+    /// requirement — typically a missing credential or a failed token
+    /// refresh in an OAuth2-style implementation.
+    #[error("auth error: {0}")]
+    Auth(#[source] BoxError),
+
     /// The underlying [`tower::Service`] returned an error while running
     /// the request.
     #[error("transport error: {0}")]
@@ -138,30 +167,63 @@ pub enum CallError<TransportError> {
 
 /// Tower service that turns typed operation requests into HTTP exchanges.
 ///
-/// Holds an inner service `S` that speaks [`Request`] → [`Response`] and
-/// a base URL used to resolve the relative URIs produced by
-/// [`MakeRequest`] implementations.
-///
-/// The client itself is `Clone` so it can be consumed by middleware like
-/// [`tower::ServiceExt::ready`] — provided the inner service is `Clone`.
-#[derive(Debug, Clone)]
+/// Holds an inner service `S` that speaks [`Request`] → [`Response`],
+/// a base URL prepended to every relative request URI, and an
+/// [`AuthSelector`] that injects credentials before the request leaves
+/// the client. The base URL is resolved from a [`Server`] at
+/// construction time and cached as an [`Arc<str>`]; auth is held as
+/// `Arc<dyn AuthSelector>`. Neither choice leaks into `ApiClient`'s
+/// type parameters, so it stays single-generic regardless of spec
+/// shape.
+#[derive(Clone)]
 pub struct ApiClient<S> {
     inner: S,
     base_url: Arc<str>,
+    auth: Arc<dyn AuthSelector>,
 }
+
+impl<S: std::fmt::Debug> std::fmt::Debug for ApiClient<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `auth` is erased; nothing useful to print beyond its existence.
+        f.debug_struct("ApiClient")
+            .field("inner", &self.inner)
+            .field("base_url", &self.base_url)
+            .field("auth", &"<dyn AuthSelector>")
+            .finish()
+    }
+}
+
 impl<S> ApiClient<S> {
-    /// Wraps `inner` with a base URL used to prefix every relative
-    /// request URI. `base_url` is stored as-is; no trailing-slash
-    /// normalisation is performed — the generator's path templates
-    /// always start with `/`.
-    pub fn new(inner: S, base_url: impl Into<Arc<str>>) -> Self {
+    /// Wraps `inner` with a base URL resolved from `server`. Accepts
+    /// anything implementing [`Server`] — a `&str` / `String` / `Arc<str>`
+    /// through the blanket impls, or a generated `ServerOption*` type.
+    /// The URL is materialised immediately; subsequent changes to
+    /// `server` (if any) are not observed.
+    ///
+    /// The client starts with [`NoAuth`]: operations that declare any
+    /// security requirement will fail with [`CallError::Auth`] until
+    /// [`ApiClient::with_auth`] installs a real selector.
+    pub fn new<Srv: Server>(inner: S, server: Srv) -> Self {
         Self {
             inner,
-            base_url: base_url.into(),
+            base_url: Arc::from(server.base_url().as_ref()),
+            auth: security::default_auth(),
         }
     }
 
-    /// Returns a reference to the base URL used by this client.
+    /// Installs an auth selector — typically the generated `AuthConfig`
+    /// for the spec. Chainable on construction:
+    ///
+    /// ```ignore
+    /// let client = ApiClient::new(transport, server).with_auth(auth);
+    /// ```
+    #[must_use]
+    pub fn with_auth<A: AuthSelector>(mut self, auth: A) -> Self {
+        self.auth = Arc::new(auth);
+        self
+    }
+
+    /// Returns a reference to the resolved base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -180,6 +242,7 @@ impl<S> ApiClient<S> {
 impl<S, Op, B> tower::Service<Op> for ApiClient<S>
 where
     Op: Operation + Send + 'static,
+    Op::Error: Into<BoxError> + Send + 'static,
     Op::Response: ParseResponse + Send + 'static,
     <Op::Response as ParseResponse>::Error: Into<DecodeError> + Send + 'static,
     S: tower::Service<Request, Response = ::http::Response<B>> + Clone + Send + 'static,
@@ -204,40 +267,35 @@ where
         let inner = self.inner.clone();
         let mut inner = std::mem::replace(&mut self.inner, inner);
         let base_url = self.base_url.clone();
+        let auth = self.auth.clone();
         Box::pin(async move {
-            let http_req = op.make_request().await;
-            let http_req = prefix_base_url(http_req, &base_url);
+            let http_req = op
+                .make_request()
+                .await
+                .map_err(|e| CallError::Encode(e.into()))?;
+            // `WithServer` bakes an absolute URL into the request; the
+            // short-circuit inside `prefix_base_url` leaves it alone,
+            // which is how op-level overrides bypass the client's own
+            // base URL.
+            let http_req = server::prefix_base_url(http_req, &base_url);
+            // Pick up the operation's security requirement — the
+            // generator attaches it via `http::Extensions`. Missing or
+            // empty → treat as public.
+            let requirements = http_req
+                .extensions()
+                .get::<OperationSecurity>()
+                .copied()
+                .unwrap_or(OperationSecurity::PUBLIC);
+            let http_req = auth
+                .apply_for(http_req, requirements.0)
+                .await
+                .map_err(CallError::Auth)?;
             let http_resp = inner.call(http_req).await.map_err(CallError::Transport)?;
             Op::Response::parse_response(http_resp)
                 .await
                 .map_err(|e| CallError::Decode(e.into()))
         })
     }
-}
-
-/// Prefixes the request's URI with `base_url` when the URI is relative
-/// (path-only). Absolute URIs pass through untouched.
-fn prefix_base_url(req: Request, base_url: &str) -> Request {
-    let (mut parts, body) = req.into_parts();
-    let uri = parts.uri.clone();
-    if uri.scheme().is_some() {
-        return Request::from_parts(parts, body);
-    }
-    let path_and_query = uri
-        .path_and_query()
-        .map(ToString::to_string)
-        .unwrap_or_default();
-    let combined = format!("{}{}", trim_trailing_slash(base_url), path_and_query);
-    if let Ok(new_uri) = combined.parse() {
-        parts.uri = new_uri;
-    }
-    Request::from_parts(parts, body)
-}
-
-/// Strips one trailing `/` so combining with a path that starts with `/`
-/// doesn't produce a doubled separator.
-fn trim_trailing_slash(s: &str) -> &str {
-    s.strip_suffix('/').unwrap_or(s)
 }
 
 /// Byte buffer whose textual/serde projection is standard base64.

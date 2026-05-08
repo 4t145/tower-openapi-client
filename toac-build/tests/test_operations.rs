@@ -42,9 +42,22 @@ fn get_with_path_param_emits_request_and_response() {
                   description: missing
     "##});
 
+    // Types live under operations::pets::by_id::get::*.
     assert!(
-        rendered.contains("pub struct GetPetRequest"),
-        "missing request struct:\n{rendered}"
+        rendered.contains("pub mod pets"),
+        "missing `pets` mod:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod by_id"),
+        "missing `by_id` mod:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod get"),
+        "missing `get` mod:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub struct Request"),
+        "request struct name should collapse to `Request`:\n{rendered}"
     );
     assert!(
         rendered.contains("pub id: String"),
@@ -55,8 +68,8 @@ fn get_with_path_param_emits_request_and_response() {
         "query param missing or wrong optionality:\n{rendered}"
     );
     assert!(
-        rendered.contains("pub enum GetPetResponse"),
-        "missing response enum:\n{rendered}"
+        rendered.contains("pub enum Response"),
+        "response enum name should collapse to `Response`:\n{rendered}"
     );
     assert!(
         rendered.contains("Status200"),
@@ -103,12 +116,18 @@ fn post_with_request_body_adds_body_field() {
                   description: any other status
     "##});
 
-    assert!(rendered.contains("pub struct CreatePetRequest"));
+    // POST /pets lives under operations::pets::post::*.
+    assert!(rendered.contains("pub mod pets"));
     assert!(
-        rendered.contains("pub body: super::components::NewPet"),
-        "body field should reference components::NewPet:\n{rendered}"
+        rendered.contains("pub mod post"),
+        "missing `post` method mod:\n{rendered}"
     );
-    assert!(rendered.contains("pub enum CreatePetResponse"));
+    assert!(rendered.contains("pub struct Request"));
+    assert!(
+        rendered.contains("pub body: crate::components::NewPet"),
+        "body field should reference crate::components::NewPet:\n{rendered}"
+    );
+    assert!(rendered.contains("pub enum Response"));
     assert!(rendered.contains("Status201"));
     assert!(
         rendered.contains("Default"),
@@ -117,7 +136,7 @@ fn post_with_request_body_adds_body_field() {
 }
 
 #[test]
-fn missing_operation_id_synthesises_method_path_name() {
+fn op_without_operation_id_still_lands_in_correct_mod() {
     let rendered = generate(indoc! {r##"
         openapi: 3.1.0
         info: { title: t, version: "0" }
@@ -129,11 +148,25 @@ fn missing_operation_id_synthesises_method_path_name() {
                   description: no content
     "##});
 
-    // method + path segments collapsed into one PascalCase ident.
+    // Module tree follows the URL template + HTTP method, regardless
+    // of whether the op declares an `operationId`.
     assert!(
-        rendered.contains("pub struct PutPetsIdFavouriteRequest"),
-        "synth name wrong:\n{rendered}"
+        rendered.contains("pub mod pets"),
+        "pets mod missing:\n{rendered}"
     );
+    assert!(
+        rendered.contains("pub mod by_id"),
+        "by_id mod missing:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod favourite"),
+        "favourite mod missing:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("pub mod put"),
+        "put method mod missing:\n{rendered}"
+    );
+    assert!(rendered.contains("pub struct Request"));
 }
 
 #[test]
@@ -163,7 +196,10 @@ fn ignored_headers_do_not_become_fields() {
                   description: ok
     "##});
 
-    assert!(rendered.contains("pub struct ListThingsRequest"));
+    // GET /things → operations::things::get::Request
+    assert!(rendered.contains("pub mod things"));
+    assert!(rendered.contains("pub mod get"));
+    assert!(rendered.contains("pub struct Request"));
     assert!(
         rendered.contains("pub x_trace_id"),
         "trace header should remain:\n{rendered}"

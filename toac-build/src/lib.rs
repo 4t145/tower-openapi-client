@@ -12,6 +12,8 @@ pub mod docs;
 pub mod generator;
 pub mod naming;
 pub mod operations;
+pub mod path_mod;
+pub mod servers;
 
 use oas3::spec;
 
@@ -65,12 +67,15 @@ pub fn build_with(
     let mut generator = Generator::with_options(spec, options);
     generator.emit_components()?;
     generator.emit_operations()?;
+    generator.emit_servers()?;
 
     let components = generator.finish_components();
     let operations = generator.finish_operations();
+    let servers = generator.finish_servers();
     Ok(quote::quote! {
         #components
         #operations
+        #servers
     })
 }
 

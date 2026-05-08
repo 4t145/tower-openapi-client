@@ -22,8 +22,13 @@ use toac::{
 };
 use toac_compile_check::{
     components::{FormatSample, NewPet, Pet},
-    operations::{CreatePetRequest, CreatePetResponse, GetPetRequest, GetPetResponse},
+    operations::pets::{by_id::get as get_pet, post as create_pet},
 };
+// Shorter aliases for the type-checked tests below.
+type GetPetRequest = get_pet::Request;
+type GetPetResponse = get_pet::Response;
+type CreatePetRequest = create_pet::Request;
+type CreatePetResponse = create_pet::Response;
 
 /// Static assertion: `{Op}Request` really implements `Operation`.
 fn assert_is_operation<T: Operation>() {}
@@ -41,7 +46,7 @@ fn get_request_renders_uri() {
         limit: Some(10),
         x_trace: Some("t1".into()),
     };
-    let http_req = futures_executor::block_on(req.make_request());
+    let http_req = futures_executor::block_on(req.make_request()).expect("make_request");
     assert_eq!(http_req.method(), http::Method::GET);
     assert_eq!(http_req.uri().to_string(), "/pets/abc?limit=10");
     assert_eq!(
@@ -58,7 +63,7 @@ fn post_body_serialises_to_json() {
     let req = CreatePetRequest {
         body: NewPet { name: "rex".into() },
     };
-    let http_req = futures_executor::block_on(req.make_request());
+    let http_req = futures_executor::block_on(req.make_request()).expect("make_request");
     assert_eq!(http_req.method(), http::Method::POST);
 
     use http_body_util::BodyExt;

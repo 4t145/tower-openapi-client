@@ -41,16 +41,23 @@ impl<'a> Generator<'a> {
     }
 
     /// Renders `pub mod operations { ... }` from the items registered
-    /// during the operations stage, prefixing bare references to
-    /// component types with `super::components::` so the generated module
-    /// compiles.
+    /// during the operations stage. Items declare their target sub-module
+    /// through `Generator::set_mod_path`; this method groups them by
+    /// that path and emits a nested `pub mod` tree.
+    ///
+    /// References to component types get rewritten to the absolute path
+    /// `crate::components::Foo` — that works at any nesting depth and
+    /// matches the `toac::include_client!` convention of placing
+    /// generated code at the crate root.
     pub fn finish_operations(&self) -> proc_macro2::TokenStream {
-        let mut items = self.items_in_stage(Stage::Operations);
-        if items.is_empty() {
-            return quote! {
-                pub mod operations {}
-            };
-        }
+        let order = match self.orders.get(&Stage::Operations) {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                return quote! {
+                    pub mod operations {}
+                };
+            }
+        };
 
         let component_idents = self.component_type_idents();
         let operation_idents = self.operation_type_idents();
@@ -58,13 +65,23 @@ impl<'a> Generator<'a> {
             component_idents,
             skip_idents: operation_idents,
         };
-        for item in items.iter_mut() {
-            rewriter.visit_item_mut(item);
+
+        // Group items by their mod path (empty path = operations root).
+        let mut root = ModNode::default();
+        for key in order {
+            let Some(item) = self.items.get(key) else {
+                continue;
+            };
+            let mut rewritten = item.clone();
+            rewriter.visit_item_mut(&mut rewritten);
+            let path = self.mod_path_for(key);
+            root.insert(path, rewritten);
         }
 
+        let body = root.render();
         quote! {
             pub mod operations {
-                #(#items)*
+                #body
             }
         }
     }
@@ -116,8 +133,14 @@ impl<'a> Generator<'a> {
 }
 
 /// `syn::visit_mut` visitor that qualifies bare references to
-/// component-level types with `super::components::...` so they resolve
-/// from inside the `operations` module.
+/// component-level types with the absolute path `crate::components::...`.
+///
+/// Absolute form (instead of `super::...`) keeps the rewrite independent
+/// of how deeply nested an operation's module ends up under
+/// `operations::` — the path-based module tree can be several levels
+/// deep, and computing the right number of `super::`s per item is more
+/// fragile than relying on the `toac::include_client!` convention of
+/// placing the generated module at the crate root.
 struct QualifyComponents {
     component_idents: BTreeSet<String>,
     skip_idents: BTreeSet<String>,
@@ -155,9 +178,59 @@ impl VisitMut for QualifyComponents {
         }
         let ident = segment.ident.clone();
         let args = segment.arguments.clone();
-        node.path = syn::parse_quote!(super::components::#ident);
+        node.path = syn::parse_quote!(crate::components::#ident);
         if let Some(last) = node.path.segments.last_mut() {
             last.arguments = args;
+        }
+    }
+}
+
+/// Node in the in-memory tree that mirrors the nested `pub mod` shape
+/// of the rendered `operations` module. Built up from each item's
+/// `mod_path`, then `render`d out as tokens.
+#[derive(Default)]
+struct ModNode {
+    /// Items placed directly at this module level, in registration order.
+    items: Vec<syn::Item>,
+    /// Child modules, keyed by segment name. Registration order is
+    /// preserved through `children_order`.
+    children: std::collections::BTreeMap<String, ModNode>,
+    /// Order in which child mods were first seen, so emission is
+    /// deterministic and mirrors walking order.
+    children_order: Vec<String>,
+}
+
+impl ModNode {
+    fn insert(&mut self, path: &[String], item: syn::Item) {
+        match path.split_first() {
+            None => self.items.push(item),
+            Some((head, tail)) => {
+                if !self.children.contains_key(head) {
+                    self.children_order.push(head.clone());
+                }
+                self.children
+                    .entry(head.clone())
+                    .or_default()
+                    .insert(tail, item);
+            }
+        }
+    }
+
+    fn render(&self) -> proc_macro2::TokenStream {
+        let items = &self.items;
+        let child_mods = self.children_order.iter().map(|name| {
+            let child = &self.children[name];
+            let body = child.render();
+            let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+            quote! {
+                pub mod #ident {
+                    #body
+                }
+            }
+        });
+        quote! {
+            #(#items)*
+            #(#child_mods)*
         }
     }
 }

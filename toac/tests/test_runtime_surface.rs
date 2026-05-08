@@ -23,7 +23,11 @@ pub struct GetPetRequest {
 }
 
 impl MakeRequest for GetPetRequest {
-    fn make_request(self) -> impl ::std::future::Future<Output = Request> + Send {
+    type Error = ::std::convert::Infallible;
+
+    fn make_request(
+        self,
+    ) -> impl ::std::future::Future<Output = Result<Request, Self::Error>> + Send {
         async move {
             let mut path = String::new();
             path.push_str("/pets/");
@@ -44,7 +48,7 @@ impl MakeRequest for GetPetRequest {
                 builder = builder.header("X-Trace", ToString::to_string(v));
             }
             let _ = query_first;
-            builder.body(Body::empty()).expect("valid request")
+            Ok(builder.body(Body::empty()).expect("valid request"))
         }
     }
 }
@@ -75,11 +79,12 @@ impl ParseResponse for GetPetResponse {
             let (parts, body) = response.into_parts();
             let bytes = BodyExt::collect(body)
                 .await
-                .map_err(|e| DecodeError::BodyRead(e.into()))?
+                .map_err(|e| DecodeError::Codec(e.into()))?
                 .to_bytes();
             match parts.status.as_u16() {
                 200 => {
-                    let v = ::serde_json::from_slice(bytes.as_ref())?;
+                    let v = ::serde_json::from_slice(bytes.as_ref())
+                        .map_err(|e| DecodeError::Codec(Box::new(e)))?;
                     Ok(Self::Status200(v))
                 }
                 404 => Ok(Self::Status404),
@@ -102,14 +107,18 @@ pub struct CreatePetRequest {
 }
 
 impl MakeRequest for CreatePetRequest {
-    fn make_request(self) -> impl ::std::future::Future<Output = Request> + Send {
+    type Error = ::serde_json::Error;
+
+    fn make_request(
+        self,
+    ) -> impl ::std::future::Future<Output = Result<Request, Self::Error>> + Send {
         async move {
-            let bytes = ::serde_json::to_vec(&self.body).expect("serialise JSON");
-            ::http::Request::builder()
+            let bytes = ::serde_json::to_vec(&self.body)?;
+            Ok(::http::Request::builder()
                 .method(::http::Method::POST)
                 .uri("/pets")
                 .body(Body::new(Full::new(Bytes::from(bytes))))
-                .expect("valid request")
+                .expect("valid request"))
         }
     }
 }
@@ -125,7 +134,7 @@ fn request_with_path_query_header() {
         limit: Some(10),
         x_trace: Some("t1".into()),
     };
-    let http_req = futures_executor::block_on(req.make_request());
+    let http_req = futures_executor::block_on(req.make_request()).expect("make_request");
     assert_eq!(http_req.method(), ::http::Method::GET);
     let uri = http_req.uri().to_string();
     assert_eq!(uri, "/pets/abc?limit=10");
@@ -143,7 +152,7 @@ fn request_body_serialises_to_json() {
     let req = CreatePetRequest {
         body: NewPet { name: "rex".into() },
     };
-    let http_req = futures_executor::block_on(req.make_request());
+    let http_req = futures_executor::block_on(req.make_request()).expect("make_request");
     let (parts, body) = http_req.into_parts();
     assert_eq!(parts.method, ::http::Method::POST);
     let collected = futures_executor::block_on(body.collect())

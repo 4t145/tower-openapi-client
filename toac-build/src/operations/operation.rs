@@ -45,9 +45,23 @@ impl<'a> Generator<'a> {
         path_item: &PathItem,
         operation: &Operation,
     ) -> Result<(), Error> {
-        let op_name = operation_name(method, path, operation);
-        let request_ident = type_ident(&format!("{op_name}Request"));
-        let response_ident = type_ident(&format!("{op_name}Response"));
+        // Compute where this op's items land in the nested `operations`
+        // module tree. All `store_*` calls until `clear_mod_path` will
+        // target this module.
+        let mod_path = crate::path_mod::mod_path(path, method);
+        self.set_mod_path(mod_path.clone());
+
+        // Path-mod layout: all types attached to one operation share a
+        // module, so their Rust names collapse to fixed `Request` /
+        // `Response`. The `mod_path` (e.g. `pets::by_id::get`) is what
+        // disambiguates across operations.
+        let request_ident = type_ident("Request");
+        let response_ident = type_ident("Response");
+
+        // Registry keys still need to be globally unique because
+        // `items` / `type_paths` are flat maps. Use the full mod path
+        // as a qualifier.
+        let key_prefix = key_prefix_for(&mod_path);
 
         let param_slots = self.collect_parameters(&request_ident, path_item, operation)?;
         let body_slot = self.collect_request_body(&request_ident, operation)?;
@@ -55,7 +69,7 @@ impl<'a> Generator<'a> {
         let request_item =
             build_request_struct(&request_ident, operation, &param_slots, body_slot.as_ref());
         self.store_named(
-            format!("__op/{request_ident}"),
+            format!("__op/{key_prefix}/Request"),
             request_ident.clone(),
             request_item,
         );
@@ -75,7 +89,7 @@ impl<'a> Generator<'a> {
         let response_variants = self.build_response_variants(&response_ident, operation)?;
         let response_item = build_response_enum(&response_ident, &response_variants);
         self.store_named(
-            format!("__op/{response_ident}"),
+            format!("__op/{key_prefix}/Response"),
             response_ident.clone(),
             response_item,
         );
@@ -86,7 +100,95 @@ impl<'a> Generator<'a> {
         let operation_impl = build_operation_impl(&request_ident, &response_ident);
         self.store_unnamed(operation_impl);
 
+        self.emit_op_level_servers(&request_ident, operation)?;
+
+        self.clear_mod_path();
         Ok(())
+    }
+
+    /// Emits operation-scoped server types and the `with_server`
+    /// inherent method when the operation declares its own `servers`.
+    ///
+    /// Types live next to the operation (in the same `operations`
+    /// module) and are named `{Op}Server`, `{Op}ServerOption{i}`,
+    /// plus nested variable-enum types following the same scheme as
+    /// root-level servers.
+    fn emit_op_level_servers(
+        &mut self,
+        request_ident: &syn::Ident,
+        operation: &Operation,
+    ) -> Result<(), Error> {
+        if operation.servers.is_empty() {
+            return Ok(());
+        }
+
+        // The op's servers live in the same `operations::<path>::<method>`
+        // module as its `Request` / `Response`, so names don't need a
+        // per-op prefix — `ServerOption0`, `ServerOption1`, `Server`
+        // qualify via the mod path.
+        let aggregate_ident = type_ident("Server");
+        let key_prefix = key_prefix_for(&self.current_mod_path.clone());
+
+        let mut option_idents: Vec<syn::Ident> = Vec::with_capacity(operation.servers.len());
+        for (index, server) in operation.servers.iter().enumerate() {
+            let option_ident = type_ident(&format!("ServerOption{index}"));
+            self.emit_op_server_option(&key_prefix, &option_ident, server)?;
+            option_idents.push(option_ident);
+        }
+
+        if option_idents.len() == 1 {
+            let only = &option_idents[0];
+            let alias: syn::Item = parse_quote! {
+                pub type #aggregate_ident = #only;
+            };
+            self.store_named(
+                format!("__op_server_agg/{key_prefix}/{aggregate_ident}"),
+                aggregate_ident.clone(),
+                alias,
+            );
+        } else {
+            self.emit_op_server_aggregate(&key_prefix, &aggregate_ident, &option_idents);
+        }
+
+        // Inherent `with_server` method on the request type.
+        let with_server_ty = crate::constants::runtime_path("WithServer");
+        let with_server_method: syn::Item = parse_quote! {
+            impl #request_ident {
+                /// Routes this call against an operation-specific server.
+                /// Only servers declared on this operation are accepted,
+                /// so invalid combinations are caught at compile time.
+                pub fn with_server(
+                    self,
+                    server: #aggregate_ident,
+                ) -> #with_server_ty<Self> {
+                    #with_server_ty::new(self, server)
+                }
+            }
+        };
+        self.store_unnamed(with_server_method);
+        Ok(())
+    }
+
+    /// Thin wrapper that reuses the root-level server-option rendering
+    /// path for op-level servers. `key_prefix` scopes the registry key
+    /// so two ops with same `ServerOption0` name don't collide.
+    fn emit_op_server_option(
+        &mut self,
+        key_prefix: &str,
+        option_ident: &syn::Ident,
+        server: &oas3::spec::Server,
+    ) -> Result<(), Error> {
+        crate::servers::emit_server_option_in_stage(self, key_prefix, option_ident, server)
+    }
+
+    /// Emits the per-op aggregate enum + `Server` impl + `Default`.
+    fn emit_op_server_aggregate(
+        &mut self,
+        key_prefix: &str,
+        aggregate_ident: &syn::Ident,
+        option_idents: &[syn::Ident],
+    ) {
+        crate::servers::emit_aggregate_in_stage(self, key_prefix, aggregate_ident, option_idents);
     }
 
     /// Resolves and merges path-level and operation-level parameters,
@@ -336,7 +438,10 @@ fn preferred_media_type(content: &BTreeMap<String, MediaType>) -> Option<(&Strin
 }
 
 /// Synthesises a PascalCase operation name. Prefers `operationId`; falls
-/// back to `{Method}{Path}` when absent.
+/// back to `{Method}{Path}` when absent. Used by the upcoming
+/// `ClientExt` convenience layer (method names), so kept despite
+/// currently being unreferenced from the path-mod rewrite.
+#[allow(dead_code)]
 fn operation_name(method: &Method, path: &str, operation: &Operation) -> String {
     if let Some(id) = operation.operation_id.as_deref() {
         return to_pascal_case(id);
@@ -346,6 +451,14 @@ fn operation_name(method: &Method, path: &str, operation: &Operation) -> String 
     raw.push(' ');
     raw.push_str(path);
     to_pascal_case(&raw)
+}
+
+/// Joins a mod path into a registry-key qualifier. `["pets", "by_id", "get"]`
+/// → `"pets/by_id/get"`. Used by `store_named` / `store_unnamed` callers
+/// to keep keys unique across ops that now share type names like
+/// `Request` / `Response` / `Server`.
+fn key_prefix_for(mod_path: &[String]) -> String {
+    mod_path.join("/")
 }
 
 /// Produces a deduplicated field ident: when two parameters normalise to
@@ -520,8 +633,9 @@ fn build_metadata_impl(
 /// Builds the runtime `MakeRequest` impl for one operation.
 ///
 /// URL rendering substitutes path template placeholders and appends any
-/// query parameters. The body is JSON-encoded into [`toac::body::Body`]
-/// when present, or defaulted to [`toac::body::Body::empty`].
+/// query parameters. When the operation declares a request body the
+/// relevant codec encodes it and sets `Content-Type`; otherwise the
+/// body defaults to [`toac::body::Body::empty`].
 fn build_make_request_impl(
     request_ident: &syn::Ident,
     method: &Method,
@@ -534,15 +648,21 @@ fn build_make_request_impl(
     let path_rendering = render_path_statements(path, params);
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
-    let body_tokens = render_body_statement(body);
+    let body_apply = render_body_apply(body);
     let make_request = crate::constants::runtime_path("MakeRequest");
     let request_ty = crate::constants::runtime_path("Request");
+    let body_ty = crate::constants::runtime_body_path();
+    let error_ty = make_request_error_ty(body);
 
     parse_quote! {
         impl #make_request for #request_ident {
+            type Error = #error_ty;
+
             fn make_request(
                 self,
-            ) -> impl ::std::future::Future<Output = #request_ty> + Send {
+            ) -> impl ::std::future::Future<
+                Output = ::std::result::Result<#request_ty, Self::Error>,
+            > + Send {
                 async move {
                     let mut __path = ::std::string::String::new();
                     #path_rendering
@@ -553,12 +673,26 @@ fn build_make_request_impl(
                         .uri(__path);
                     #header_rendering
 
-                    __builder
-                        .body(#body_tokens)
-                        .expect("valid generated HTTP request")
+                    let __request = __builder
+                        .body(#body_ty::empty())
+                        .expect("valid generated HTTP request");
+                    #body_apply
                 }
             }
         }
+    }
+}
+
+/// Error type used by the generated `MakeRequest` impl.
+///
+/// Operations without a request body cannot fail during encoding, so
+/// their `Error` associated type is [`::std::convert::Infallible`].
+/// Operations with a JSON body propagate `serde_json::Error`.
+fn make_request_error_ty(body: Option<&BodySlot>) -> syn::Type {
+    if body.is_some() {
+        parse_quote!(::serde_json::Error)
+    } else {
+        parse_quote!(::std::convert::Infallible)
     }
 }
 
@@ -598,6 +732,7 @@ fn build_parse_response_impl(
     let fallback = match default_arm {
         Some(variant) => default_fallback_tokens(response_ident, variant),
         None => quote! {
+            ::std::mem::drop(__body);
             return ::std::result::Result::Err(
                 #decode_error::UnexpectedStatus(__status),
             );
@@ -618,30 +753,11 @@ fn build_parse_response_impl(
     // declared), always return that variant without touching the body.
     let empty_fallback = if variants.is_empty() {
         quote! {
-            let _ = __body;
+            ::std::mem::drop(__body);
             return ::std::result::Result::Ok(#response_ident::Empty);
         }
     } else {
         quote! {}
-    };
-
-    // Whether we actually need to collect the body: only when at least
-    // one variant carries a payload that must be JSON-decoded.
-    let needs_body = variants.iter().any(|v| v.inner_type.is_some());
-    let body_collect = if needs_body {
-        quote! {
-            let __bytes = {
-                use ::http_body_util::BodyExt;
-                BodyExt::collect(__body)
-                    .await
-                    .map_err(|e| #decode_error::BodyRead(::std::convert::Into::into(e)))?
-                    .to_bytes()
-            };
-        }
-    } else {
-        quote! {
-            let _ = __body;
-        }
     };
 
     parse_quote! {
@@ -663,7 +779,6 @@ fn build_parse_response_impl(
                     let (__parts, __body) = response.into_parts();
                     let __status = __parts.status;
                     #empty_fallback
-                    #body_collect
                     #arm_tokens
                     #fallback
                 }
@@ -797,41 +912,41 @@ fn render_one_header(slot: &ParamSlot) -> proc_macro2::TokenStream {
     }
 }
 
-/// Tokens for the `.body(...)` expression fed into `http::request::Builder`.
+/// Tokens that fold the request body into the pre-built `__request`.
 ///
-/// Bodies are JSON-encoded into [`http_body_util::Full<Bytes>`] and then
-/// wrapped into [`toac::body::Body`] so every generated request carries
-/// the same concrete body type. Operations without a body use
-/// [`toac::body::Body::empty`].
-fn render_body_statement(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
-    let body_ty = crate::constants::runtime_body_path();
+/// Operations without a body leave `__request` as-is. Operations with
+/// a JSON body feed it through [`toac::body::codec::encode_body`],
+/// which writes the serialised bytes and sets `Content-Type`. Optional
+/// bodies are skipped when absent.
+fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
+    let encode_fn = crate::constants::runtime_body_codec_path("encode_body");
+    let encoder_ty = crate::constants::runtime_body_codec_path("json::JsonEncoder");
+
     let Some(body) = body else {
-        return quote! { #body_ty::empty() };
+        return quote! {
+            ::std::result::Result::Ok(__request)
+        };
     };
 
     let field = &body.ident;
     if body.required {
         quote! {
-            {
-                let __bytes = ::serde_json::to_vec(&self.#field)
-                    .expect("request body serialises to JSON");
-                #body_ty::new(
-                    ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
-                )
-            }
+            #encode_fn(
+                &<#encoder_ty as ::std::default::Default>::default(),
+                &self.#field,
+                __request,
+            )
         }
     } else {
         quote! {
             match &self.#field {
-                ::std::option::Option::Some(__body) => {
-                    let __bytes = ::serde_json::to_vec(__body)
-                        .expect("request body serialises to JSON");
-                    #body_ty::new(
-                        ::http_body_util::Full::new(::bytes::Bytes::from(__bytes))
-                    )
-                }
+                ::std::option::Option::Some(__payload) => #encode_fn(
+                    &<#encoder_ty as ::std::default::Default>::default(),
+                    __payload,
+                    __request,
+                ),
                 ::std::option::Option::None => {
-                    #body_ty::empty()
+                    ::std::result::Result::Ok(__request)
                 }
             }
         }
@@ -842,17 +957,17 @@ fn render_body_statement(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
 /// enum variant. Returns `None` for statuses that can't be expressed as a
 /// single `u16` (e.g. `2XX`, `default`) so callers can handle them
 /// separately.
+///
+/// Arms that carry a payload move `__body` into the codec decoder and
+/// `return` from the async block, so `__body` stays available for the
+/// fallback path when no arm matches.
 fn response_match_arm(variant: &ResponseVariant) -> Option<proc_macro2::TokenStream> {
     let status: u16 = variant.status.parse().ok()?;
     let variant_ident = &variant.variant_ident;
     let body_tokens = match &variant.inner_type {
-        Some(_) => quote! {
-            let __value = ::serde_json::from_slice(__bytes.as_ref())?;
-            return ::std::result::Result::Ok(
-                Self::#variant_ident(__value)
-            );
-        },
+        Some(_) => decode_variant_body(quote! { Self::#variant_ident }),
         None => quote! {
+            ::std::mem::drop(__body);
             return ::std::result::Result::Ok(Self::#variant_ident);
         },
     };
@@ -868,13 +983,28 @@ fn default_fallback_tokens(
 ) -> proc_macro2::TokenStream {
     let variant_ident = &variant.variant_ident;
     match &variant.inner_type {
-        Some(_) => quote! {
-            let __value = ::serde_json::from_slice(__bytes.as_ref())?;
-            ::std::result::Result::Ok(#response_ident::#variant_ident(__value))
-        },
+        Some(_) => decode_variant_body(quote! { #response_ident::#variant_ident }),
         None => quote! {
-            ::std::result::Result::Ok(#response_ident::#variant_ident)
+            ::std::mem::drop(__body);
+            return ::std::result::Result::Ok(#response_ident::#variant_ident);
         },
+    }
+}
+
+/// Decodes `__body` through the JSON codec into the variant payload and
+/// returns the wrapping enum value. `constructor` is the tokenised path
+/// of the tuple-variant constructor (e.g. `Self::Status200` or
+/// `GetPetResponse::Default`).
+fn decode_variant_body(constructor: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    let decode_error = crate::constants::runtime_path("DecodeError");
+    let decode_body = crate::constants::runtime_body_codec_path("decode_body");
+    let decoder_ty = crate::constants::runtime_body_codec_path("json::JsonDecoder");
+    quote! {
+        let __decoder = <#decoder_ty as ::std::default::Default>::default();
+        let __value = #decode_body(&__decoder, __body)
+            .await
+            .map_err(|e| #decode_error::Codec(::std::convert::Into::into(e)))?;
+        return ::std::result::Result::Ok(#constructor(__value));
     }
 }
 

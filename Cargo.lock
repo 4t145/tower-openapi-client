@@ -1264,6 +1264,7 @@ dependencies = [
  "http",
  "http-body",
  "http-body-util",
+ "percent-encoding",
  "serde",
  "serde_json",
  "thiserror",

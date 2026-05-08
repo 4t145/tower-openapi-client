@@ -14,7 +14,12 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true }
-base64 = { workspace = true, optional = true }
+# Required for HTTP Basic auth (built-in `BasicCredential`) and opt-in
+# `Base64String` used by `BuildOptions::use_base64_string`.
+base64 = { workspace = true }
+# Percent-encoding for URL path / query construction in auth injection
+# and (future) parameter rendering.
+percent-encoding = { workspace = true }
 
 [dev-dependencies]
 anyhow = { workspace = true }
@@ -25,4 +30,4 @@ serde = { workspace = true, features = ["derive"] }
 # Enables `Base64String`, which wraps `bytes::Bytes` and projects to/from
 # standard base64 at serde / display boundaries. Required when generated
 # code uses `BuildOptions::use_base64_string = true`.
-base64 = ["dep:base64"]
+base64 = []

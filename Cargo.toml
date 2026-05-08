@@ -38,6 +38,7 @@ proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
 base64 = "0.22"
+percent-encoding = "2"
 
 # Dev / tooling.
 anyhow = "1"

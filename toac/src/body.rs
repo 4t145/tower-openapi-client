@@ -8,6 +8,8 @@
 //! Bytes>` (from hyper, reqwest, etc.) into the runtime with a single
 //! `Body::new` call.
 
+pub mod codec;
+
 use std::pin::Pin;
 use std::task::Poll;
 

@@ -43,6 +43,8 @@ pub enum Stage {
     Components,
     /// Per-operation request/response types.
     Operations,
+    /// Server options, aggregate server enum, and client alias.
+    Servers,
 }
 
 /// Codegen tunables passed through to the generator.
@@ -88,6 +90,18 @@ pub struct Generator<'a> {
     /// impls, not named types). Global across stages.
     pub(crate) type_paths: BTreeMap<String, syn::Type>,
 
+    /// Registry key → nested module path where the item should be emitted.
+    /// An empty vec (or absent entry) means "top of the stage's module";
+    /// `["pets", "by_id", "get"]` means `operations::pets::by_id::get::*`.
+    /// Only the `Operations` stage populates this today.
+    pub(crate) item_mod_paths: BTreeMap<String, Vec<String>>,
+
+    /// Sticky mod path applied to every subsequent `store_*` call until
+    /// cleared or replaced. Lets call sites emit a cluster of items
+    /// (struct + impls + sub-types) into the same mod without threading
+    /// the path through every helper.
+    pub(crate) current_mod_path: Vec<String>,
+
     /// Stage currently receiving new items.
     pub(crate) current_stage: Stage,
 
@@ -108,12 +122,15 @@ impl<'a> Generator<'a> {
         let mut orders: BTreeMap<Stage, Vec<String>> = BTreeMap::new();
         orders.insert(Stage::Components, Vec::new());
         orders.insert(Stage::Operations, Vec::new());
+        orders.insert(Stage::Servers, Vec::new());
         Self {
             spec,
             options,
             orders,
             items: BTreeMap::new(),
             type_paths: BTreeMap::new(),
+            item_mod_paths: BTreeMap::new(),
+            current_mod_path: Vec::new(),
             current_stage: Stage::Components,
             anon_counter: 0,
         }
@@ -128,6 +145,31 @@ impl<'a> Generator<'a> {
     /// the new stage's order list.
     pub fn set_stage(&mut self, stage: Stage) {
         self.current_stage = stage;
+    }
+
+    /// Sets the sticky mod path for subsequent `store_*` calls.
+    ///
+    /// Every item registered after this call, until [`Self::clear_mod_path`]
+    /// or another `set_mod_path`, records its module home as `path`. The
+    /// stage's `finish_*` method uses those paths to build a nested
+    /// `pub mod` tree instead of emitting one flat list.
+    pub(crate) fn set_mod_path<P: Into<Vec<String>>>(&mut self, path: P) {
+        self.current_mod_path = path.into();
+    }
+
+    /// Clears the sticky mod path so subsequent items land at the stage
+    /// module's root.
+    pub(crate) fn clear_mod_path(&mut self) {
+        self.current_mod_path.clear();
+    }
+
+    /// Returns the mod path an item was registered under. Empty means
+    /// "stage module root".
+    pub(crate) fn mod_path_for(&self, key: &str) -> &[String] {
+        self.item_mod_paths
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Returns the items emitted during `stage`, in registration order.
@@ -195,6 +237,10 @@ impl<'a> Generator<'a> {
     }
 
     fn push_to_current(&mut self, key: String) {
+        if !self.current_mod_path.is_empty() {
+            self.item_mod_paths
+                .insert(key.clone(), self.current_mod_path.clone());
+        }
         self.orders.entry(self.current_stage).or_default().push(key);
     }
 
