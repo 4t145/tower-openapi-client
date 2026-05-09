@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     });
     
     let http = client_util::client::build_https_client::<toac::body::Body>()?;
-    let client: DaytonaClient = ApiClient::new(http, base_url).with_auth(BearerAuth {
+    let mut client: DaytonaClient = ApiClient::new(http, base_url).with_auth(BearerAuth {
         credential: BearerCredential { token },
     });
 
