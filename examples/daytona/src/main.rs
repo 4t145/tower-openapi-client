@@ -11,12 +11,12 @@
 
 use std::env;
 
-use daytona_example::{components::Organization, operations::organizations::get as list_orgs};
+use daytona_example::{components::Organization, operations::organizations::get as list_orgs, operations::sandbox::get as list_sandboxes};
 use toac::{
     ApiClient, AuthSelector, Request, SecurityCredential,
     security::{AuthFuture, BearerCredential},
 };
-use tower::ServiceExt;
+use tower::{Service, ServiceExt};
 use tracing::{error, info, warn};
 
 /// Daytona's public API root.
@@ -25,6 +25,9 @@ const DAYTONA_BASE_URL: &str = "https://app.daytona.io/api";
 /// Environment variable used to supply the bearer token. Keep out of
 /// source; create a personal API key from the Daytona dashboard.
 const API_KEY_ENV: &str = "DAYTONA_API_KEY";
+/// Optional environment variable to override the API URL. If not set, defaults to `DAYTONA_BASE_URL`. 
+/// Useful for testing against a local Daytona instance.
+const API_URL_ENV: &str = "DAYTONA_API_URL";
 
 type HttpClient = client_util::client::HyperHttpsClient<toac::body::Body>;
 type DaytonaClient = ApiClient<HttpClient>;
@@ -43,17 +46,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     };
 
+    let base_url = env::var(API_URL_ENV).ok().unwrap_or_else(|| {
+        info!("using default API URL: {DAYTONA_BASE_URL}");
+        DAYTONA_BASE_URL.to_string()
+    });
+    
     let http = client_util::client::build_https_client::<toac::body::Body>()?;
-    let client: DaytonaClient = ApiClient::new(http, DAYTONA_BASE_URL).with_auth(BearerAuth {
+    let client: DaytonaClient = ApiClient::new(http, base_url).with_auth(BearerAuth {
         credential: BearerCredential { token },
     });
 
-    demo_list_organizations(client).await;
+    demo_list_organizations(&mut client).await;
+    demo_list_sandboxes(&mut client).await;
     Ok(())
 }
 
 /// GET /organizations — lists every organization the token can see.
-async fn demo_list_organizations(client: DaytonaClient) {
+async fn demo_list_organizations(client: &mut DaytonaClient) {
     info!("GET /organizations");
     match client.oneshot(list_orgs::Request {}).await {
         Ok(list_orgs::Response::Status200(orgs)) => {
@@ -66,6 +75,27 @@ async fn demo_list_organizations(client: DaytonaClient) {
             }
         }
         Err(err) => report_call_error("listOrganizations", &err),
+    }
+}
+
+async fn demo_list_sandboxes(client: &mut DaytonaClient) {
+    info!("GET /sandboxes");
+    match client.call(list_sandboxes::Request {
+        x_daytona_organization_id: std::env::var("DAYTONA_ORGANIZATION_ID").ok(),
+        verbose: None,
+        labels: None,
+        include_errored_deleted: None,
+    }).await {
+        Ok(list_sandboxes::Response::Status200(sandboxes)) => {
+            info!(count = sandboxes.len(), "sandboxes returned");
+            for sb in sandboxes.iter().take(5) {
+                info!(id = %sb.id, name = %sb.name, "sandbox");
+            }
+            if sandboxes.len() > 5 {
+                info!(omitted = sandboxes.len() - 5, "… remaining sandboxes elided");
+            }
+        }
+        Err(err) => report_call_error("listSandboxes", &err),
     }
 }
 

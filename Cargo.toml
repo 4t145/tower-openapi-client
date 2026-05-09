@@ -39,7 +39,7 @@ quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }
 base64 = "0.22"
 percent-encoding = "2"
-
+tracing = "0.1"
 # Dev / tooling.
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }

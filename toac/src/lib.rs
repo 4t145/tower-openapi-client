@@ -290,6 +290,7 @@ where
                 .apply_for(http_req, requirements.0)
                 .await
                 .map_err(CallError::Auth)?;
+            tracing::info!(uri= ?http_req.uri(), method = ?http_req.method(), headers = ?http_req.headers(), body = ?http_req.body(), "request");
             let http_resp = inner.call(http_req).await.map_err(CallError::Transport)?;
             Op::Response::parse_response(http_resp)
                 .await

@@ -20,7 +20,7 @@ base64 = { workspace = true }
 # Percent-encoding for URL path / query construction in auth injection
 # and (future) parameter rendering.
 percent-encoding = { workspace = true }
-
+tracing = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 futures-executor = { workspace = true }
