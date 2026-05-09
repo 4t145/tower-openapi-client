@@ -847,13 +847,30 @@ fn render_query_statements(params: &[ParamSlot]) -> proc_macro2::TokenStream {
 fn render_one_query(slot: &ParamSlot) -> proc_macro2::TokenStream {
     let field = &slot.field_ident;
     let wire = slot.parameter.name.as_str();
-    let append = quote! {
-        let __sep = if __query_first { '?' } else { '&' };
-        __query_first = false;
-        __path.push(__sep);
-        __path.push_str(#wire);
-        __path.push('=');
-        __path.push_str(&::std::string::ToString::to_string(&__value));
+    // Scalar fields stringify directly; array-shaped fields expand to
+    // repeated `?key=a&key=b` entries, matching OAS's default
+    // `style=form, explode=true` for query parameters. A full
+    // `style`/`explode` implementation is still TODO.
+    let append = if is_vec_type(&slot.inner_ty) {
+        quote! {
+            for __item in __value.iter() {
+                let __sep = if __query_first { '?' } else { '&' };
+                __query_first = false;
+                __path.push(__sep);
+                __path.push_str(#wire);
+                __path.push('=');
+                __path.push_str(&::std::string::ToString::to_string(__item));
+            }
+        }
+    } else {
+        quote! {
+            let __sep = if __query_first { '?' } else { '&' };
+            __query_first = false;
+            __path.push(__sep);
+            __path.push_str(#wire);
+            __path.push('=');
+            __path.push_str(&::std::string::ToString::to_string(&__value));
+        }
     };
 
     if slot.is_required() {
@@ -870,6 +887,17 @@ fn render_one_query(slot: &ParamSlot) -> proc_macro2::TokenStream {
             }
         }
     }
+}
+
+/// Returns `true` if `ty` is a `Vec<_>` (plain or path-qualified).
+fn is_vec_type(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    path.path
+        .segments
+        .last()
+        .is_some_and(|seg| seg.ident == "Vec")
 }
 
 /// Statements that set header parameters on `__builder`.

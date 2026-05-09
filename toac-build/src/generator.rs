@@ -96,6 +96,12 @@ pub struct Generator<'a> {
     /// Only the `Operations` stage populates this today.
     pub(crate) item_mod_paths: BTreeMap<String, Vec<String>>,
 
+    /// Ref paths whose Rust ident has been reserved by
+    /// `reserve_schema_ident` but whose body hasn't been emitted yet.
+    /// Lets `ensure_named_schema` tell "reserved but not built" apart
+    /// from "in-flight recursion" and "fully built".
+    pub(crate) reserved_refs: std::collections::BTreeSet<String>,
+
     /// Sticky mod path applied to every subsequent `store_*` call until
     /// cleared or replaced. Lets call sites emit a cluster of items
     /// (struct + impls + sub-types) into the same mod without threading
@@ -130,6 +136,7 @@ impl<'a> Generator<'a> {
             items: BTreeMap::new(),
             type_paths: BTreeMap::new(),
             item_mod_paths: BTreeMap::new(),
+            reserved_refs: std::collections::BTreeSet::new(),
             current_mod_path: Vec::new(),
             current_stage: Stage::Components,
             anon_counter: 0,

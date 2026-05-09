@@ -1,0 +1,30 @@
+[package]
+name = "daytona-example"
+version = "0.0.0"
+edition.workspace = true
+publish = false
+
+[[bin]]
+name = "daytona-example"
+path = "src/main.rs"
+
+# `toac-build`'s `Builder` API handles parse / pretty / write, so the
+# build script only needs this one dep.
+[build-dependencies]
+toac-build = { workspace = true }
+
+[dependencies]
+toac = { workspace = true, features = ["base64"] }
+bytes = { workspace = true, features = ["serde"] }
+chrono = { workspace = true }
+http = { workspace = true }
+http-body = { workspace = true }
+http-body-util = { workspace = true, features = ["full"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+tower = { workspace = true, features = ["util"] }
+uuid = { workspace = true }
+client-util = { version = "0.3" }
+tokio = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

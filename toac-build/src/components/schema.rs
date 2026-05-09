@@ -41,8 +41,34 @@ impl<'a> Generator<'a> {
         self.ensure_named_schema(&ref_path, name, schema_or_ref)
     }
 
-    /// Materialises a named schema, emitting it into `items` on first visit
-    /// and returning the cached type path on subsequent visits.
+    /// Pre-registers a component schema's Rust type identifier so that
+    /// later `hoist_name` calls can't collide with it. The reservation
+    /// is tracked separately so [`Self::ensure_named_schema`] knows it
+    /// still needs to build the underlying item on first real visit.
+    /// Idempotent.
+    pub(crate) fn reserve_schema_ident(&mut self, name: &str) {
+        let ref_path = format!("{SCHEMA_REF_PREFIX}{name}");
+        if self.type_paths.contains_key(&ref_path) {
+            return;
+        }
+        let type_name = type_ident(name);
+        let ty: syn::Type = parse_quote!(#type_name);
+        self.type_paths.insert(ref_path.clone(), ty);
+        self.reserved_refs.insert(ref_path);
+    }
+
+    /// Materialises a named schema, emitting it into `items` on first
+    /// visit and returning the cached type path on subsequent visits.
+    ///
+    /// Two states are distinguished:
+    /// - fully built (entry in both `type_paths` and `reserved_refs`
+    ///   cleared) — early return with the cached type.
+    /// - reserved placeholder (from [`Self::reserve_schema_ident`]:
+    ///   entry in `type_paths` but still in `reserved_refs`) — fall
+    ///   through to actually build, clearing the reservation.
+    /// - recursing on a schema already in flight (entry in `type_paths`
+    ///   but neither built nor reserved-pending) — early return so
+    ///   self-references don't blow the stack.
     pub(crate) fn ensure_named_schema(
         &mut self,
         ref_path: &str,
@@ -50,12 +76,21 @@ impl<'a> Generator<'a> {
         schema_or_ref: &ObjectOrReference<ObjectSchema>,
     ) -> Result<syn::Type, Error> {
         if let Some(ty) = self.type_paths.get(ref_path) {
-            return Ok(ty.clone());
+            // A reservation means we haven't actually emitted yet — we
+            // still need to build. Anything else (in-flight recursion
+            // or fully built) short-circuits on the cached type.
+            if !self.reserved_refs.contains(ref_path) {
+                return Ok(ty.clone());
+            }
         }
 
         let type_name = type_ident(display_name);
         let ty: syn::Type = parse_quote!(#type_name);
         self.type_paths.insert(ref_path.to_owned(), ty.clone());
+        // Consume the reservation so recursive calls land in the
+        // "in-flight" branch above instead of re-entering this
+        // function.
+        self.reserved_refs.remove(ref_path);
 
         let resolved = self.resolve(schema_or_ref)?;
         let item = self.build_named_item(&type_name, &resolved)?;
@@ -72,7 +107,13 @@ impl<'a> Generator<'a> {
         schema: &ObjectSchema,
     ) -> Result<syn::Item, Error> {
         if !schema.enum_values.is_empty() && is_string_schema(schema) {
-            return build_string_enum(type_name, schema, doc_attrs(schema));
+            let mut items = build_string_enum_items(type_name, schema, doc_attrs(schema))?;
+            // First item is the enum itself — return that as the
+            // "named" component, store the rest (Display impl) as
+            // extras so they land in the same module.
+            let enum_item = items.remove(0);
+            self.store_extra_items(items);
+            return Ok(enum_item);
         }
 
         if let Some(sum) = detect_sum_kind(schema) {
@@ -239,8 +280,10 @@ impl<'a> Generator<'a> {
 
         if !schema.enum_values.is_empty() && is_string_schema(schema) {
             let type_name = self.hoist_name(parent_type, field_name);
-            let item = build_string_enum(&type_name, schema, doc_attrs(schema))?;
-            self.store_hoisted(type_name.clone(), item);
+            let mut items = build_string_enum_items(&type_name, schema, doc_attrs(schema))?;
+            let enum_item = items.remove(0);
+            self.store_hoisted(type_name.clone(), enum_item);
+            self.store_extra_items(items);
             let ty: syn::Type = parse_quote!(#type_name);
             return Ok(maybe_optionalise(ty, is_nullable(schema)));
         }
@@ -565,13 +608,20 @@ fn maybe_optionalise(ty: syn::Type, nullable: bool) -> syn::Type {
     }
 }
 
-/// Builds a `pub enum` for a string schema with `enum` values.
-fn build_string_enum(
+/// Builds a `pub enum` for a string schema with `enum` values. Produces
+/// both the enum item and a matching [`Display`] impl so the variant
+/// renders as its wire value — parameter encoding in the generated
+/// `MakeRequest` impl stringifies values through `ToString`.
+///
+/// Returns a vec of items: the enum first, followed by the Display impl.
+fn build_string_enum_items(
     type_name: &syn::Ident,
     schema: &ObjectSchema,
     attrs: Vec<syn::Attribute>,
-) -> Result<syn::Item, Error> {
+) -> Result<Vec<syn::Item>, Error> {
     let mut variants: Vec<syn::Variant> = Vec::with_capacity(schema.enum_values.len());
+    let mut display_arms: Vec<proc_macro2::TokenStream> =
+        Vec::with_capacity(schema.enum_values.len());
     for value in &schema.enum_values {
         let Some(raw) = value.as_str() else {
             return Err(Error::Unsupported(format!(
@@ -588,15 +638,28 @@ fn build_string_enum(
             #rename
             #variant_ident
         });
+        display_arms.push(quote! {
+            Self::#variant_ident => ::std::write!(__f, #raw)
+        });
     }
 
-    Ok(parse_quote! {
+    let enum_item: syn::Item = parse_quote! {
         #(#attrs)*
-        #[derive(Debug, Clone, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
         pub enum #type_name {
             #(#variants,)*
         }
-    })
+    };
+    let display_impl: syn::Item = parse_quote! {
+        impl ::std::fmt::Display for #type_name {
+            fn fmt(&self, __f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match self {
+                    #(#display_arms,)*
+                }
+            }
+        }
+    };
+    Ok(vec![enum_item, display_impl])
 }
 
 /// Doc-level attrs (title, description, examples, deprecated) without any

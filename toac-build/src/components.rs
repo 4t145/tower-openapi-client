@@ -33,6 +33,19 @@ impl<'a> Generator<'a> {
             .iter()
             .map(|(name, schema_or_ref)| (name.clone(), schema_or_ref.clone()))
             .collect();
+
+        // Pre-reserve every named schema's type identifier so that
+        // inline sub-schemas (which may be hoisted with a synthesised
+        // `{Parent}{Field}` name) can't accidentally claim an ident
+        // that belongs to a later-visited named component. Without
+        // this, a spec with both a `Sandbox` component containing an
+        // inline `class` enum and a standalone `SandboxClass` component
+        // would end up with two `SandboxClass` definitions — the
+        // hoisted one wins because `Sandbox` sorts before `SandboxClass`.
+        for (name, _) in &schemas {
+            self.reserve_schema_ident(name);
+        }
+
         for (name, schema_or_ref) in schemas {
             self.ensure_schema(&name, &schema_or_ref)?;
         }

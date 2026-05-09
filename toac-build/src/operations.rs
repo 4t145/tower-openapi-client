@@ -221,7 +221,12 @@ impl ModNode {
         let child_mods = self.children_order.iter().map(|name| {
             let child = &self.children[name];
             let body = child.render();
-            let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+            // `make_ident` handles Rust keywords by emitting the
+            // `r#` raw-identifier form (or a `_`-suffix fallback for
+            // the few keywords that can't be raw-escaped), which lets
+            // paths like `/type` and `/move` round-trip into legal mod
+            // names.
+            let ident = crate::naming::make_ident(name);
             quote! {
                 pub mod #ident {
                     #body
