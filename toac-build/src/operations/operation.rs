@@ -302,7 +302,7 @@ impl<'a> Generator<'a> {
             return Ok(None);
         };
         let body = body_or_ref.resolve(self.spec)?;
-        let Some((_, media)) = preferred_media_type(&body.content) else {
+        let Some((content_type, media)) = preferred_media_type(&body.content) else {
             return Ok(None);
         };
         let Some(schema_or_ref) = media.schema.as_ref() else {
@@ -315,6 +315,7 @@ impl<'a> Generator<'a> {
             inner_ty,
             description: body.description.clone(),
             required: body.required.unwrap_or(false),
+            content_type: content_type.clone(),
         }))
     }
 
@@ -401,6 +402,12 @@ struct BodySlot {
     inner_ty: syn::Type,
     description: Option<String>,
     required: bool,
+    /// Wire `Content-Type` selected from the operation's `content` map
+    /// (e.g. `application/json`, `application/vnd.github+json`). Used
+    /// by `render_body_apply` to configure the codec's emitted
+    /// `Content-Type` header so JSON-suffixed vendor MIMEs round-trip
+    /// faithfully.
+    content_type: String,
 }
 
 impl BodySlot {
@@ -1031,9 +1038,16 @@ fn render_one_header(slot: &ParamSlot) -> proc_macro2::TokenStream {
 /// Tokens that fold the request body into the pre-built `__request`.
 ///
 /// Operations without a body leave `__request` as-is. Operations with
-/// a JSON body feed it through [`toac::body::codec::encode_body`],
-/// which writes the serialised bytes and sets `Content-Type`. Optional
-/// bodies are skipped when absent.
+/// a JSON body (including `application/*+json` vendor MIMEs) feed it
+/// through [`toac::body::codec::encode_body`], which writes the
+/// serialised bytes and sets `Content-Type`. Optional bodies are
+/// skipped when absent.
+///
+/// When the spec's MIME is anything other than plain
+/// `application/json` the generated encoder is constructed through a
+/// small builder block so the encoder emits the exact vendor MIME
+/// (e.g. `application/vnd.github+json`). Plain JSON still uses
+/// `JsonEncoder::default()` — zero extra tokens for the common case.
 fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
     let encode_fn = crate::constants::runtime_body_codec_path("encode_body");
     let encoder_ty = crate::constants::runtime_body_codec_path("json::JsonEncoder");
@@ -1044,11 +1058,12 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
         };
     };
 
+    let encoder_expr = render_json_encoder_expr(&encoder_ty, &body.content_type);
     let field = &body.ident;
     if body.required {
         quote! {
             #encode_fn(
-                &<#encoder_ty as ::std::default::Default>::default(),
+                &#encoder_expr,
                 &self.#field,
                 __request,
             )
@@ -1057,7 +1072,7 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
         quote! {
             match &self.#field {
                 ::std::option::Option::Some(__payload) => #encode_fn(
-                    &<#encoder_ty as ::std::default::Default>::default(),
+                    &#encoder_expr,
                     __payload,
                     __request,
                 ),
@@ -1065,6 +1080,31 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
                     ::std::result::Result::Ok(__request)
                 }
             }
+        }
+    }
+}
+
+/// Constructs the `JsonEncoder` value for [`render_body_apply`].
+///
+/// The common case (`application/json`) collapses to
+/// `JsonEncoder::default()` — zero extra tokens. Vendor MIMEs like
+/// `application/vnd.github+json` emit a struct-literal that overrides
+/// `content_type` so the wire Content-Type matches the spec. The call
+/// to `HeaderValue::from_static` is safe because OAS MIME strings are
+/// restricted to ASCII.
+fn render_json_encoder_expr(
+    encoder_ty: &syn::Path,
+    content_type: &str,
+) -> proc_macro2::TokenStream {
+    if content_type.eq_ignore_ascii_case("application/json") {
+        return quote! {
+            <#encoder_ty as ::std::default::Default>::default()
+        };
+    }
+    quote! {
+        #encoder_ty {
+            content_type: ::http::HeaderValue::from_static(#content_type),
+            ..<#encoder_ty as ::std::default::Default>::default()
         }
     }
 }

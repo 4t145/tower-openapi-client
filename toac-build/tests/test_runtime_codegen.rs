@@ -140,6 +140,11 @@ fn make_request_wraps_body_for_post() {
         compact.contains("::toac::body::codec::json::JsonEncoder"),
         "JSON encoder not selected:\n{rendered}"
     );
+    // Plain `application/json` — default encoder, no Content-Type override.
+    assert!(
+        !compact.contains("HeaderValue::from_static"),
+        "plain application/json should not emit a Content-Type override:\n{rendered}"
+    );
     assert!(
         compact.contains("&self.body"),
         "body field not referenced:\n{rendered}"
@@ -147,6 +152,52 @@ fn make_request_wraps_body_for_post() {
     assert!(
         compact.contains("type Error = ::serde_json::Error"),
         "JSON-body operation should propagate serde_json::Error:\n{rendered}"
+    );
+}
+
+#[test]
+fn vendor_json_mime_overrides_content_type() {
+    // `application/vnd.github+json` is a common "JSON with a vendor
+    // sub-type" MIME. The generator should reuse JsonEncoder's serde
+    // path but override the Content-Type header so the wire value
+    // matches the spec exactly.
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        components:
+          schemas:
+            NewPet:
+              type: object
+              required: [name]
+              properties:
+                name: { type: string }
+        paths:
+          /pets:
+            post:
+              operationId: createPet
+              requestBody:
+                required: true
+                content:
+                  application/vnd.github+json:
+                    schema:
+                      $ref: "#/components/schemas/NewPet"
+              responses:
+                "201":
+                  description: created
+    "##});
+
+    let compact = compact(&rendered);
+    assert!(
+        compact.contains("::toac::body::codec::json::JsonEncoder"),
+        "JSON encoder should still be picked for +json:\n{rendered}"
+    );
+    assert!(
+        compact.contains("::http::HeaderValue::from_static(\"application/vnd.github+json\")"),
+        "Content-Type override missing or wrong value:\n{rendered}"
+    );
+    assert!(
+        compact.contains("content_type: ::http::HeaderValue::from_static"),
+        "encoder struct literal should set the content_type field:\n{rendered}"
     );
 }
 

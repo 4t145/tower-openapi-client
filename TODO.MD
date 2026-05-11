@@ -38,29 +38,77 @@ OAS 的 tags 目前**不**用于组织生成代码——类型的归宿由 path 
 `ClientExt` 层面的 tag 入口。
 
 #### webhook
-待定
+out of scope（见"明确不做的范围"小节）。
 
 #### components
-每一个Component应该对应Rust中的一个类型，这些类型要能够适当的转换为Component中要求的编码结构
-
-
+每一个 Component 对应 Rust 中的一个类型。**已落地**：
+`components.schemas` → `pub mod components { ... }` 里的
+`struct` / `enum` / `type alias`，以及 `From` / `TryFrom` / `Display`
+等相关 impl。其他 component kind（parameters / requestBodies /
+responses / headers / examples / links / callbacks / pathItems）目前
+通过 `oas3::Spec::resolve` 隐式展开，不生成独立 Rust 类型。
 
 #### security
-待定
+**已落地**。详见"Security / Auth 支持"小节（全部 7 步都已完成）。
+生成 `pub mod security` 含 per-scheme credential + `AuthConfig` +
+`AuthConfigBuilder` + `AuthSelector` impl；每个 op 在 `impl Request`
+暴露 `pub const SECURITY` 并在 `make_request` 里注入
+`http::Extensions::OperationSecurity`；`ApiClient::with_auth` 注入凭据。
 
 #### externalDocs
-externalDocs要转化为文件的顶层`!\\`文档
+**未实现**。README 里明确要"转化为文件顶层 `!//` 文档"，目前
+`Info` / `license` / `contact` / `externalDocs` / 根 `description`
+全部没有落到生成 crate 的元数据上。单独列在下面"未完成的大方向"。
 
 # TODO
+
+## 状态快照（2026-05-11）
+
+### ✅ 已完成
+- **运行时核心**：`MakeRequest` / `ParseResponse` / `Operation` / `ApiClient` 单泛型
+- **Server**：`Server` trait + blanket impls（`&str` / `String` / `Arc<str>`）+ `WithServer` op-level override wrapper；生成器产出 `pub mod servers` 含 `ServerOption*` + `ApiServer` 聚合
+- **Security 本期范围**：`SecurityCredential` / `AuthSelector` / `OperationSecurity` / `NoAuth` + 内置 API Key / Bearer / Basic 凭据；生成 `pub mod security` 含 `AuthConfig` + builder；`ApiClient::with_auth`
+- **Codec (仅 JSON)**：`JsonEncoder` / `JsonDecoder`；request body encode + response body decode 全链路通过 codec
+- **CallError**：`Encode` / `Auth` / `Transport` / `Decode` 四分支
+- **Operations 按 path 重组 mod**：`operations::<path>::<method>::{Request, Response, Server}`
+- **Components**：`components.schemas` → Rust 类型（含递归自动 Box、allOf 扁平化、oneOf/anyOf → enum、discriminator → internally-tagged serde、string enum 带 Display）
+- **Examples**：`examples/petstore`（hyper + HTTPS 真实调用）+ `examples/daytona`（生成 `AuthConfig` 驱动 bearer auth）
+
+### ☐ 规划了但还没动
+- **Client 便捷层 `ClientExt`**（见本文档下方"Client 便捷层"小节）：路径 mod 已经铺好，就差生成 `pub trait ClientExt<S>` + blanket impl
+- **更多 media type codec**：form-urlencoded / multipart / octet-stream / text/plain 的空文件都在 `toac/src/body/codec/` 了，等实现
+- **外部文档元数据**：`info` / `externalDocs` / `license` / `contact` → 生成 crate 的 `//!` doc（当前完全没处理）
+
+### 🚫 明确不做
+- **Webhooks / Callbacks**：服务端接收端点，不在客户端项目范围
+- **Server codegen**：同上，只做客户端
+- **OAuth2 flow 完整实现**：留给用户写自己的 `AuthSelector`（`SecurityCredential` 的 async + Result 签名已经为此留空间）
+- **OpenID Connect Discovery**：同上
+- **mutualTLS 证书管理**：属于传输层配置，不是 HTTP header 注入
+
+### 🤔 还没决定
+- **README 里承诺的 tag → mod 分组**：和 path mod 冲突，目前选择了 path，tag 仅作 spec 元数据；未来真需要分组导航时再加 `ClientExt` 入口方法
+- **非 schemas 的 components**（parameters / responses / requestBodies / headers 等）：当前通过 `oas3::resolve` 隐式展开，未生成独立 Rust 类型。是否生成未决
+
+---
+
 ## 实现功能缺失
 
 - prefixItems
 
-## Operations 按 path 重组 mod（client 便捷层的前置工作）
+## Operations 按 path 重组 mod（✅ 已完成）
 
 把 `operations::` 下扁平的 `{Op}Request` / `{Op}Response` / `{Op}Server*`
 按 **URL path + HTTP method** 组织进嵌套子模块。类型名统一收敛为
 `Request` / `Response`（不再带 op 名前缀），用户通过 mod 路径导航。
+
+**状态**：全部落地。`toac-build/src/path_mod.rs` 提供映射，
+`operations::emit_operation` 在生成时 set_mod_path，`finish_operations`
+按路径组装嵌套 `pub mod`。`QualifyComponents` rewrite 到
+`crate::components::Foo`。相关 codegen test 见
+`toac-build/tests/test_operations.rs`、`test_runtime_codegen.rs`、
+`test_servers.rs`、`test_security.rs`——全部已迁移到新路径。以下
+保留原设计文档作为实现参考，不需要再做。
 
 ### 动机
 
@@ -161,9 +209,9 @@ pub enum Server { Option0(ServerOption0), Option1(ServerOption1) }
 
 ---
 
-## Client 便捷层（ClientExt）
+## Client 便捷层（ClientExt）☐ 尚未落地
 
-**前置依赖**：上一节"Operations 按 path 重组 mod"。
+**前置依赖**：上一节"Operations 按 path 重组 mod"——**已完成**。现在可以开工。
 
 目标：兑现 README 的"在 client 上提供一个叫 `{api_name}` 的方法"承诺。不改
 `toac::ApiClient` 的类型参数，不破坏孤儿原则，让用户写
@@ -258,9 +306,11 @@ where S: ::tower::Service<::toac::Request, Response = ::http::Response<B>>
 - 多 spec 并用时 `ClientExt` 重名：用户 `use a::client_ext::ClientExt as AExt; use b::client_ext::ClientExt as BExt;` 解决？还是生成器给 trait 加 spec 前缀？
 - 方法名和 Rust 关键字冲突（`type`、`ref` 等）→ 用 `make_ident` 加 `r#`？
 
-## Security / Auth 支持
+## Security / Auth 支持（✅ 本期范围全部完成）
 
 目标：让生成的 client 能处理**绝大多数真实 API** 的鉴权需求——API Key 和 HTTP Auth (Basic/Bearer)——而无需用户自己写 tower layer 注入凭据。OAuth2 / OpenID Connect / mutualTLS 列为远期目标，当前阶段只做到"识别但不处理"。
+
+**状态**：运行时（`toac/src/security.rs`）+ 生成器（`toac-build/src/security.rs`）+ codegen 测试（`toac-build/tests/test_security.rs`）全部落地；daytona 示例用生成的 `AuthConfig` 工作。以下内容保留作为实现参考与远期目标记录。
 
 ### 本期范围（P0）
 
@@ -419,12 +469,12 @@ let auth = AuthConfig::builder()
 
 | Media Type                            | Encode (req body) | Decode (resp body) | 模块                | 备注                                               |
 | ------------------------------------- | ----------------- | ------------------ | ------------------- | -------------------------------------------------- |
-| `application/json`                    | ☐                 | ☐                  | `codec::json`       | 现状：硬编码在 operation.rs，要抽出成模块          |
-| `application/*+json`                  | ☐                 | ☐                  | `codec::json`       | 复用 json，只换 Content-Type 字面量                |
-| `application/x-www-form-urlencoded`   | ☐                 | —                  | `codec::form`       | `serde_urlencoded`；response 侧现实中不存在        |
-| `multipart/form-data`                 | ☐                 | —                  | `codec::multipart`  | 接口与其他 codec 不一致，需单独设计；response 极罕见 |
-| `application/octet-stream`            | ☐                 | ☐                  | `codec::octet`      | 直接 `Bytes` / `binary` format                     |
-| `text/plain`                          | ☐                 | ☐                  | `codec::text`       | payload = `String`                                 |
+| `application/json`                    | ✅                | ✅                 | `codec::json`       | `JsonEncoder` / `JsonDecoder` 落地；生成器硬选 JSON |
+| `application/*+json`                  | ✅                | ✅                 | `codec::json`       | Encoder 复用 JSON 序列化，Content-Type 按 spec 覆写（struct literal 改 `content_type` 字段）；Decoder 不关心 MIME 因此自动兼容 |
+| `application/x-www-form-urlencoded`   | ☐                 | —                  | `codec::form`       | 文件存在但**空的**；要引 `serde_urlencoded`         |
+| `multipart/form-data`                 | ☐                 | —                  | `codec::multipart`  | 文件存在但**空的**；接口与其他 codec 不一致，需单独设计 |
+| `application/octet-stream`            | ☐                 | ☐                  | `codec::octet`      | 文件存在但**空的**；直接 `Bytes` / `binary` format  |
+| `text/plain`                          | ☐                 | ☐                  | `codec::text`       | 文件存在但**空的**；payload = `String`              |
 | *没有 body*                           | ✅                | ✅                 | —                   | 已支持                                             |
 
 ### P1 — 常见但可以稍后
