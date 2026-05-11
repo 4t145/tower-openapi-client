@@ -13,6 +13,7 @@ pub mod generator;
 pub mod naming;
 pub mod operations;
 pub mod path_mod;
+pub mod security;
 pub mod servers;
 
 use oas3::spec;
@@ -68,14 +69,17 @@ pub fn build_with(
     generator.emit_components()?;
     generator.emit_operations()?;
     generator.emit_servers()?;
+    generator.emit_security()?;
 
     let components = generator.finish_components();
     let operations = generator.finish_operations();
     let servers = generator.finish_servers();
+    let security = generator.finish_security();
     Ok(quote::quote! {
         #components
         #operations
         #servers
+        #security
     })
 }
 

@@ -391,10 +391,10 @@ let auth = AuthConfig::builder()
 1. ✅ **运行时 trait**：`SecurityCredential`（async + Result）+ `AuthSelector`（dyn-safe）+ `OperationSecurity` + `NoAuth`，`CallError::Auth` 分支。
 2. ✅ **内置凭据类型**：`ApiKeyCredential`（3 种 location）、`BearerCredential`、`BasicCredential`，附 8 个单元测试 + 2 个 `ApiClient` end-to-end 测试。
 3. ✅ **`ApiClient::with_auth`**：`Arc<dyn AuthSelector>` 替换默认 `NoAuth`。
-4. ☐ **scheme codegen**：`components.securitySchemes` → per-spec 凭据 newtype（包一下内置类型或直接用别名）+ 聚合 `AuthConfig`（实现 `AuthSelector`）+ builder。
-5. ☐ **per-op `SECURITY` 常量 + Extensions 注入**：生成器在每个 op 的 `make_request` 末尾把 `OperationSecurity(&[&[...]])` 塞进 `http::Extensions`。
-6. ☐ **遇到不支持的 scheme → `Error::Unsupported`**：OAuth2 / OIDC / mutualTLS / 非 bearer|basic 的 HTTP scheme 在 codegen 阶段直接报错。
-7. ☐ **codegen 测试**：各 scheme 组合 + AND/OR 多 requirement + 根级/op 级 security override + 缺凭据报错 + public op 跳过。
+4. ✅ **scheme codegen**：`components.securitySchemes` → per-spec 凭据 newtype（delegate 到内置 `ApiKeyCredential`/`BearerCredential`/`BasicCredential`）+ 聚合 `AuthConfig`（实现 `AuthSelector`）+ builder。
+5. ✅ **per-op `SECURITY` 常量 + Extensions 注入**：`impl Request { pub const SECURITY }` + `make_request` 末尾 `request.extensions_mut().insert(OperationSecurity(...))`。
+6. ✅ **遇到不支持的 scheme → 降级处理**：OAuth2 / OIDC / mutualTLS / 非 bearer|basic 的 HTTP scheme 在 `components` 里被静默跳过；op 的 `security` 引用它们时——**单个 alternative 全不支持** → 丢掉该 alternative（emit `cargo:warning=`），**全部 alternative 都挂** → 退化为空 SECURITY。比原计划的 `Error::Unsupported` 更宽松，让 petstore 这种 oauth2-only 的 op 也能共存。
+7. ✅ **codegen 测试**：`test_security.rs` 覆盖 bearer/apiKey/basic 各自形态 + 不支持 scheme 跳过 + 不支持 alternative 丢弃 + public op 空 SECURITY + 继承 spec-level。
 
 ### 远期目标（明确 P1/P2，本期不做）
 

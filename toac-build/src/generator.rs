@@ -45,6 +45,8 @@ pub enum Stage {
     Operations,
     /// Server options, aggregate server enum, and client alias.
     Servers,
+    /// Per-scheme credential wrappers and the aggregate `AuthConfig`.
+    Security,
 }
 
 /// Codegen tunables passed through to the generator.
@@ -102,6 +104,15 @@ pub struct Generator<'a> {
     /// from "in-flight recursion" and "fully built".
     pub(crate) reserved_refs: std::collections::BTreeSet<String>,
 
+    /// Security schemes the generator accepted from
+    /// `components.securitySchemes`. Populated lazily by
+    /// [`Self::ensure_supported_schemes`]; used by the operations
+    /// stage to validate that each op's declared security requirement
+    /// only names known schemes, and by the security stage to emit
+    /// matching credential types.
+    pub(crate) supported_schemes:
+        ::std::option::Option<BTreeMap<String, crate::security::SupportedScheme>>,
+
     /// Sticky mod path applied to every subsequent `store_*` call until
     /// cleared or replaced. Lets call sites emit a cluster of items
     /// (struct + impls + sub-types) into the same mod without threading
@@ -129,6 +140,7 @@ impl<'a> Generator<'a> {
         orders.insert(Stage::Components, Vec::new());
         orders.insert(Stage::Operations, Vec::new());
         orders.insert(Stage::Servers, Vec::new());
+        orders.insert(Stage::Security, Vec::new());
         Self {
             spec,
             options,
@@ -137,10 +149,25 @@ impl<'a> Generator<'a> {
             type_paths: BTreeMap::new(),
             item_mod_paths: BTreeMap::new(),
             reserved_refs: std::collections::BTreeSet::new(),
+            supported_schemes: ::std::option::Option::None,
             current_mod_path: Vec::new(),
             current_stage: Stage::Components,
             anon_counter: 0,
         }
+    }
+
+    /// Resolves `components.securitySchemes` into the generator's
+    /// shared cache. Repeated calls are no-ops; the first one surfaces
+    /// [`Error::Unsupported`] for any scheme whose shape the runtime
+    /// can't handle.
+    pub(crate) fn ensure_supported_schemes(
+        &mut self,
+    ) -> Result<&BTreeMap<String, crate::security::SupportedScheme>, Error> {
+        if self.supported_schemes.is_none() {
+            let schemes = crate::security::resolve_supported_schemes(self.spec)?;
+            self.supported_schemes = Some(schemes);
+        }
+        Ok(self.supported_schemes.as_ref().expect("just populated"))
     }
 
     /// Returns the active codegen options.

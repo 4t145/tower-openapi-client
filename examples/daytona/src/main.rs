@@ -2,23 +2,20 @@
 //! Daytona API over a hyper HTTPS client, authenticating with a Bearer
 //! token supplied via `DAYTONA_API_KEY`.
 //!
-//! The Daytona public instance ( `https://app.daytona.io/api` ) gates
-//! most endpoints behind the `bearer` security scheme. This demo uses
-//! `toac::BearerCredential` directly because the generator doesn't yet
-//! produce an `AuthConfig` for declared schemes — that codegen step is
-//! on the Security roadmap. Once it lands the wiring below collapses
-//! into `.with_auth(AuthConfig::builder().bearer(token).build())`.
+//! The Daytona public instance (`https://app.daytona.io/api`) gates
+//! most endpoints behind the `bearer` security scheme. The generator
+//! now emits a per-spec `AuthConfig` (plus builder) wired into the
+//! runtime's `AuthSelector`, so the demo just calls
+//! `AuthConfig::builder().bearer(token).build()` and hands that to
+//! `ApiClient::with_auth`.
 
 use std::env;
 
 use daytona_example::{
     components::Organization, operations::organizations::get as list_orgs,
-    operations::sandbox::get as list_sandboxes,
+    operations::sandbox::get as list_sandboxes, security::AuthConfig,
 };
-use toac::{
-    ApiClient, AuthSelector, Request, SecurityCredential,
-    security::{AuthFuture, BearerCredential},
-};
+use toac::ApiClient;
 use tower::Service;
 use tracing::{error, info, warn};
 
@@ -54,10 +51,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         DAYTONA_BASE_URL.to_string()
     });
 
+    let auth = AuthConfig::builder().bearer(token).build();
     let http = client_util::client::build_https_client::<toac::body::Body>()?;
-    let mut client: DaytonaClient = ApiClient::new(http, base_url).with_auth(BearerAuth {
-        credential: BearerCredential { token },
-    });
+    let mut client: DaytonaClient = ApiClient::new(http, base_url).with_auth(auth);
 
     demo_list_organizations(&mut client).await;
     demo_list_sandboxes(&mut client).await;
@@ -121,23 +117,5 @@ fn report_call_error<E: std::fmt::Display>(op: &str, err: &toac::CallError<E>) {
         toac::CallError::Auth(e) => warn!(op, error = %e, "auth error"),
         toac::CallError::Transport(e) => warn!(op, error = %e, "transport error"),
         toac::CallError::Decode(e) => warn!(op, error = %e, "decode error"),
-    }
-}
-
-/// Standalone `AuthSelector` that unconditionally attaches a
-/// [`BearerCredential`]. Serves as a stopgap until the generator emits
-/// a per-spec `AuthConfig` that routes `OperationSecurity` entries to
-/// the matching credential.
-struct BearerAuth {
-    credential: BearerCredential,
-}
-
-impl AuthSelector for BearerAuth {
-    fn apply_for(
-        &self,
-        req: Request,
-        _requirements: &'static [&'static [&'static str]],
-    ) -> AuthFuture<'_> {
-        Box::pin(async move { self.credential.apply(req).await })
     }
 }

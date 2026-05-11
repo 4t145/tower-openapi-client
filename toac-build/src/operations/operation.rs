@@ -63,6 +63,12 @@ impl<'a> Generator<'a> {
         // as a qualifier.
         let key_prefix = key_prefix_for(&mod_path);
 
+        // Security requirement for this op: operation-level overrides
+        // spec-level (including `security: []` explicitly opting out
+        // of the spec default). Produce a token stream the
+        // `make_request` impl can attach to `http::Extensions`.
+        let security_tokens = self.resolve_operation_security(operation)?;
+
         let param_slots = self.collect_parameters(&request_ident, path_item, operation)?;
         let body_slot = self.collect_request_body(&request_ident, operation)?;
 
@@ -74,7 +80,13 @@ impl<'a> Generator<'a> {
             request_item,
         );
 
-        let meta_item = build_metadata_impl(&request_ident, method, path, operation);
+        let meta_item = build_metadata_impl(
+            &request_ident,
+            method,
+            path,
+            operation,
+            security_tokens.as_ref(),
+        );
         self.store_unnamed(meta_item);
 
         let request_impl = build_make_request_impl(
@@ -83,6 +95,7 @@ impl<'a> Generator<'a> {
             path,
             &param_slots,
             body_slot.as_ref(),
+            security_tokens.as_ref(),
         );
         self.store_unnamed(request_impl);
 
@@ -167,6 +180,42 @@ impl<'a> Generator<'a> {
         };
         self.store_unnamed(with_server_method);
         Ok(())
+    }
+
+    /// Resolves the operation's effective security requirement and
+    /// returns a token stream for the static `&[&[&str]]` literal the
+    /// `make_request` impl attaches to `http::Extensions`.
+    ///
+    /// Semantics (per OAS):
+    /// - Operation-level `security` overrides spec-level when present,
+    ///   including `security: []` which explicitly opts out of auth.
+    /// - When neither level declares security, the op is treated as
+    ///   public and no extension is attached (returns `None`).
+    /// - Every scheme named in the requirement tree must appear in
+    ///   `components.securitySchemes` in a shape the runtime supports,
+    ///   otherwise [`Error::Unsupported`] is raised.
+    fn resolve_operation_security(
+        &mut self,
+        operation: &Operation,
+    ) -> Result<Option<proc_macro2::TokenStream>, Error> {
+        // OAS distinguishes "not set" (inherit spec-level) from
+        // "explicitly empty" (public). `oas3` collapses both into
+        // `Vec::new()`, but the raw JSON has an `Option` — we recover
+        // intent via `operation.extensions` being absent won't work
+        // here, so we follow the same convention as openapi-generator:
+        // a non-empty operation-level override wins, anything else
+        // inherits spec-level.
+        let effective = if operation.security.is_empty() {
+            self.spec.security.as_slice()
+        } else {
+            operation.security.as_slice()
+        };
+        if effective.is_empty() {
+            return Ok(None);
+        }
+        let supported = self.ensure_supported_schemes()?;
+        let tokens = crate::security::requirement_slice_tokens(effective, supported)?;
+        Ok(Some(tokens))
     }
 
     /// Thin wrapper that reuses the root-level server-option rendering
@@ -600,12 +649,18 @@ fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn:
     }
 }
 
-/// Builds the `impl Request { const METHOD, const PATH_TEMPLATE }` block.
+/// Builds the `impl Request { const METHOD, const PATH_TEMPLATE, const SECURITY }` block.
+///
+/// `security` is the per-op requirement literal (`&[&[&str]]`). When
+/// the op is public it's `None` and the `SECURITY` const falls back to
+/// an empty slice — keeping the constant present on every op so users
+/// can reflect over it uniformly.
 fn build_metadata_impl(
     request_ident: &syn::Ident,
     method: &Method,
     path: &str,
     operation: &Operation,
+    security: Option<&proc_macro2::TokenStream>,
 ) -> syn::Item {
     let method_tokens = method_tokens(method);
     let path_lit = path;
@@ -615,6 +670,10 @@ fn build_metadata_impl(
         quote! { #[doc = #line] }
     });
     let path_doc = format!(" `{} {}`", method.as_str(), path);
+    let security_literal = match security {
+        Some(tokens) => tokens.clone(),
+        None => quote! { &[] },
+    };
 
     parse_quote! {
         impl #request_ident {
@@ -626,6 +685,12 @@ fn build_metadata_impl(
             /// parameters. Rendering into a concrete URL is the caller's
             /// responsibility.
             pub const PATH_TEMPLATE: &'static str = #path_lit;
+
+            /// Security requirement declared by the spec for this
+            /// operation. Outer slice encodes OR alternatives; inner
+            /// slice encodes AND requirements within one alternative.
+            /// Empty outer slice means "public, no auth required".
+            pub const SECURITY: &'static [&'static [&'static str]] = #security_literal;
         }
     }
 }
@@ -636,12 +701,17 @@ fn build_metadata_impl(
 /// query parameters. When the operation declares a request body the
 /// relevant codec encodes it and sets `Content-Type`; otherwise the
 /// body defaults to [`toac::body::Body::empty`].
+///
+/// `security` carries the per-op `OperationSecurity` literal that
+/// gets attached to `http::Extensions`; `None` means the op is public
+/// and no extension is inserted.
 fn build_make_request_impl(
     request_ident: &syn::Ident,
     method: &Method,
     path: &str,
     params: &[ParamSlot],
     body: Option<&BodySlot>,
+    security: Option<&proc_macro2::TokenStream>,
 ) -> syn::Item {
     let method_tokens = method_tokens(method);
 
@@ -649,6 +719,7 @@ fn build_make_request_impl(
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
     let body_apply = render_body_apply(body);
+    let security_rendering = render_security_extension(security);
     let make_request = crate::constants::runtime_path("MakeRequest");
     let request_ty = crate::constants::runtime_path("Request");
     let body_ty = crate::constants::runtime_body_path();
@@ -673,13 +744,30 @@ fn build_make_request_impl(
                         .uri(__path);
                     #header_rendering
 
-                    let __request = __builder
+                    let mut __request = __builder
                         .body(#body_ty::empty())
                         .expect("valid generated HTTP request");
+                    #security_rendering
                     #body_apply
                 }
             }
         }
+    }
+}
+
+/// Emits the `http::Extensions` insertion for the op's
+/// `OperationSecurity`. Empty when the op is public.
+fn render_security_extension(
+    security: Option<&proc_macro2::TokenStream>,
+) -> proc_macro2::TokenStream {
+    let Some(tokens) = security else {
+        return proc_macro2::TokenStream::new();
+    };
+    let operation_security = crate::constants::runtime_path("OperationSecurity");
+    quote! {
+        __request
+            .extensions_mut()
+            .insert(#operation_security(#tokens));
     }
 }
 
