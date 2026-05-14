@@ -33,10 +33,22 @@ where
 {
     let (mut parts, _) = request.into_parts();
     let body = encoder.encode(data)?;
-    parts
-        .headers
-        .insert(http::header::CONTENT_TYPE, encoder.content_type());
+    parts.headers.insert(
+        http::header::CONTENT_TYPE,
+        BodyContentType::content_type(encoder),
+    );
     Ok(Request::from_parts(parts, body))
+}
+
+/// The wire `Content-Type` an encoder advertises.
+///
+/// Lives on a separate trait from [`BodyEncoder`] because it doesn't
+/// depend on the payload type. Splitting it lets one encoder type
+/// implement [`BodyEncoder<&T>`] for many different `T`s without
+/// having to disambiguate `enc.content_type()` calls.
+pub trait BodyContentType {
+    /// `Content-Type` header this encoder writes onto the request.
+    fn content_type(&self) -> HeaderValue;
 }
 
 /// Synchronous body encoder.
@@ -44,7 +56,7 @@ where
 /// Body encoding is CPU work, not I/O, so this trait is intentionally
 /// not `async`. Use [`encode_body`] from generated code to fuse the
 /// resulting body back into an existing [`Request`].
-pub trait BodyEncoder<T> {
+pub trait BodyEncoder<T>: BodyContentType {
     /// Serialisation error raised by [`BodyEncoder::encode`].
     type Error: std::error::Error + Send + Sync + 'static;
 
@@ -54,9 +66,6 @@ pub trait BodyEncoder<T> {
     ///
     /// Returns [`Self::Error`] when the payload cannot be serialised.
     fn encode(&self, data: T) -> Result<Body, Self::Error>;
-
-    /// `Content-Type` header this encoder expects on the wire.
-    fn content_type(&self) -> HeaderValue;
 }
 
 /// Decodes `body` into a typed value `O` using `decoder`.

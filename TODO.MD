@@ -68,7 +68,7 @@ responses / headers / examples / links / callbacks / pathItems）目前
 - **运行时核心**：`MakeRequest` / `ParseResponse` / `Operation` / `ApiClient` 单泛型
 - **Server**：`Server` trait + blanket impls（`&str` / `String` / `Arc<str>`）+ `WithServer` op-level override wrapper；生成器产出 `pub mod servers` 含 `ServerOption*` + `ApiServer` 聚合
 - **Security 本期范围**：`SecurityCredential` / `AuthSelector` / `OperationSecurity` / `NoAuth` + 内置 API Key / Bearer / Basic 凭据；生成 `pub mod security` 含 `AuthConfig` + builder；`ApiClient::with_auth`
-- **Codec (仅 JSON)**：`JsonEncoder` / `JsonDecoder`；request body encode + response body decode 全链路通过 codec
+- **Codec 全套**：`BodyContentType` + `BodyEncoder<T>` + `BodyDecoder<O>` 三件套，覆盖 JSON / form / multipart / octet / text；生成器按 MIME 选 codec 并按 codec 决定 body Rust 类型（schema → struct / `Bytes` / `String` / `MultipartForm`）
 - **CallError**：`Encode` / `Auth` / `Transport` / `Decode` 四分支
 - **Operations 按 path 重组 mod**：`operations::<path>::<method>::{Request, Response, Server}`
 - **Components**：`components.schemas` → Rust 类型（含递归自动 Box、allOf 扁平化、oneOf/anyOf → enum、discriminator → internally-tagged serde、string enum 带 Display）
@@ -76,7 +76,6 @@ responses / headers / examples / links / callbacks / pathItems）目前
 
 ### ☐ 规划了但还没动
 - **Client 便捷层 `ClientExt`**（见本文档下方"Client 便捷层"小节）：路径 mod 已经铺好，就差生成 `pub trait ClientExt<S>` + blanket impl
-- **更多 media type codec**：form-urlencoded / multipart / octet-stream / text/plain 的空文件都在 `toac/src/body/codec/` 了，等实现
 - **外部文档元数据**：`info` / `externalDocs` / `license` / `contact` → 生成 crate 的 `//!` doc（当前完全没处理）
 
 ### 🚫 明确不做
@@ -469,12 +468,12 @@ let auth = AuthConfig::builder()
 
 | Media Type                            | Encode (req body) | Decode (resp body) | 模块                | 备注                                               |
 | ------------------------------------- | ----------------- | ------------------ | ------------------- | -------------------------------------------------- |
-| `application/json`                    | ✅                | ✅                 | `codec::json`       | `JsonEncoder` / `JsonDecoder` 落地；生成器硬选 JSON |
-| `application/*+json`                  | ✅                | ✅                 | `codec::json`       | Encoder 复用 JSON 序列化，Content-Type 按 spec 覆写（struct literal 改 `content_type` 字段）；Decoder 不关心 MIME 因此自动兼容 |
-| `application/x-www-form-urlencoded`   | ☐                 | —                  | `codec::form`       | 文件存在但**空的**；要引 `serde_urlencoded`         |
-| `multipart/form-data`                 | ☐                 | —                  | `codec::multipart`  | 文件存在但**空的**；接口与其他 codec 不一致，需单独设计 |
-| `application/octet-stream`            | ☐                 | ☐                  | `codec::octet`      | 文件存在但**空的**；直接 `Bytes` / `binary` format  |
-| `text/plain`                          | ☐                 | ☐                  | `codec::text`       | 文件存在但**空的**；payload = `String`              |
+| `application/json`                    | ✅                | ✅                 | `codec::json`       | `JsonEncoder` / `JsonDecoder`；生成器按 MIME 选 codec |
+| `application/*+json`                  | ✅                | ✅                 | `codec::json`       | 复用 JSON 序列化，Content-Type 按 spec 覆写         |
+| `application/x-www-form-urlencoded`   | ✅                | —                  | `codec::form`       | `FormEncoder` (serde_urlencoded)；payload 是任何 `Serialize` |
+| `multipart/form-data`                 | ✅                | —                  | `codec::multipart`  | `MultipartForm` builder + `MultipartEncoder` (RFC 7578) |
+| `application/octet-stream`            | ✅                | ✅                 | `codec::octet`      | `OctetEncoder` / `OctetDecoder`，payload 是 `bytes::Bytes`，覆盖 `image/*`、`audio/*`、`application/pdf` 等 |
+| `text/plain`                          | ✅                | ✅                 | `codec::text`       | `TextEncoder` / `TextDecoder`，payload 是 `String`，UTF-8 校验 |
 | *没有 body*                           | ✅                | ✅                 | —                   | 已支持                                             |
 
 ### P1 — 常见但可以稍后

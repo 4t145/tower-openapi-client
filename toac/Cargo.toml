@@ -20,6 +20,8 @@ base64 = { workspace = true }
 # Percent-encoding for URL path / query construction in auth injection
 # and (future) parameter rendering.
 percent-encoding = { workspace = true }
+# `application/x-www-form-urlencoded` codec.
+serde_urlencoded = { workspace = true }
 tracing = { workspace = true }
 [dev-dependencies]
 anyhow = { workspace = true }

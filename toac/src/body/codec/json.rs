@@ -4,7 +4,7 @@ use http::HeaderValue;
 use http_body_util::{BodyExt, Full};
 use serde::de::DeserializeOwned;
 
-use crate::body::codec::{BodyDecoder, BodyEncoder};
+use crate::body::codec::{BodyContentType, BodyDecoder, BodyEncoder};
 
 #[derive(Clone, Debug)]
 pub struct JsonEncoder {
@@ -21,6 +21,12 @@ impl Default for JsonEncoder {
     }
 }
 
+impl BodyContentType for JsonEncoder {
+    fn content_type(&self) -> HeaderValue {
+        self.content_type.clone()
+    }
+}
+
 impl<T: serde::Serialize> BodyEncoder<&T> for JsonEncoder {
     type Error = serde_json::Error;
     fn encode(&self, data: &T) -> Result<crate::body::Body, Self::Error> {
@@ -30,10 +36,6 @@ impl<T: serde::Serialize> BodyEncoder<&T> for JsonEncoder {
             serde_json::ser::to_vec(data)
         }?;
         Ok(crate::body::Body::new(Full::new(encoded.into())))
-    }
-
-    fn content_type(&self) -> http::HeaderValue {
-        self.content_type.clone()
     }
 }
 #[derive(Clone, Debug, Default)]

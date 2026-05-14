@@ -305,17 +305,44 @@ impl<'a> Generator<'a> {
         let Some((content_type, media)) = preferred_media_type(&body.content) else {
             return Ok(None);
         };
-        let Some(schema_or_ref) = media.schema.as_ref() else {
-            return Ok(None);
+
+        // Pick the runtime codec from the MIME. Unknown MIMEs fall
+        // back to JSON because most ad-hoc vendor types in the wild
+        // are JSON-shaped — same fallback policy as the old hardcoded
+        // path. Worst case the user's serde shape doesn't fit and the
+        // generated code fails to compile, which is preferable to
+        // silently picking octet-stream and treating the body as
+        // raw bytes.
+        let codec = CodecKind::classify(content_type).unwrap_or(CodecKind::Json);
+
+        // The Rust payload type depends on the codec, not the schema.
+        // - JSON / form follow the schema (serde-shaped).
+        // - octet-stream → `bytes::Bytes`, schema is ignored.
+        // - text/plain → `String`, schema is ignored.
+        // - multipart → `::toac::body::codec::multipart::MultipartForm`
+        //   (the spec's per-field schemas don't translate to a single
+        //   serde shape; users assemble the form by hand).
+        let inner_ty = match codec {
+            CodecKind::Json | CodecKind::Form => match media.schema.as_ref() {
+                Some(schema_or_ref) => {
+                    self.field_type_from_schema(parent, BODY_FIELD_NAME, schema_or_ref)?
+                }
+                None => return Ok(None),
+            },
+            CodecKind::Octet => parse_quote!(::bytes::Bytes),
+            CodecKind::Text => parse_quote!(::std::string::String),
+            CodecKind::Multipart => {
+                parse_quote!(::toac::body::codec::multipart::MultipartForm)
+            }
         };
 
-        let inner_ty = self.field_type_from_schema(parent, BODY_FIELD_NAME, schema_or_ref)?;
         Ok(Some(BodySlot {
             ident: make_ident(BODY_FIELD_NAME),
             inner_ty,
             description: body.description.clone(),
             required: body.required.unwrap_or(false),
             content_type: content_type.clone(),
+            codec,
         }))
     }
 
@@ -334,21 +361,33 @@ impl<'a> Generator<'a> {
                 continue;
             };
             let variant_ident = response_variant_ident(status);
-            let inner_type = match preferred_media_type(&response.content) {
-                Some((_, media)) => match media.schema.as_ref() {
-                    Some(schema_or_ref) => Some(self.field_type_from_schema(
-                        enum_ident,
-                        &format!("{variant_ident}Body"),
-                        schema_or_ref,
-                    )?),
-                    None => None,
-                },
-                None => None,
+            let (inner_type, codec) = match preferred_media_type(&response.content) {
+                Some((mime, media)) => {
+                    let codec = CodecKind::classify(mime).unwrap_or(CodecKind::Json);
+                    let ty = match codec {
+                        CodecKind::Json => match media.schema.as_ref() {
+                            Some(schema_or_ref) => Some(self.field_type_from_schema(
+                                enum_ident,
+                                &format!("{variant_ident}Body"),
+                                schema_or_ref,
+                            )?),
+                            None => None,
+                        },
+                        CodecKind::Octet => Some(parse_quote!(::bytes::Bytes)),
+                        CodecKind::Text => Some(parse_quote!(::std::string::String)),
+                        // Form / multipart responses don't exist in real
+                        // APIs (see codec doc); treat them as opaque.
+                        CodecKind::Form | CodecKind::Multipart => None,
+                    };
+                    (ty, Some(codec))
+                }
+                None => (None, None),
             };
             out.push(ResponseVariant {
                 status: status.clone(),
                 variant_ident,
                 inner_type,
+                codec,
                 description: response.description.clone(),
             });
         }
@@ -408,6 +447,10 @@ struct BodySlot {
     /// `Content-Type` header so JSON-suffixed vendor MIMEs round-trip
     /// faithfully.
     content_type: String,
+    /// Which runtime codec drives encoding for this body. Mirrors the
+    /// MIME selection — JSON shapes pick a serde-aware encoder, octet
+    /// shapes pick the byte encoder, etc.
+    codec: CodecKind,
 }
 
 impl BodySlot {
@@ -429,6 +472,8 @@ struct ResponseVariant {
     variant_ident: syn::Ident,
     /// Payload type, `None` for unit variants.
     inner_type: Option<syn::Type>,
+    /// Codec to drive decoding, present iff `inner_type` is.
+    codec: Option<CodecKind>,
     /// Free-form description lifted from the spec.
     description: Option<String>,
 }
@@ -491,6 +536,60 @@ fn preferred_media_type(content: &BTreeMap<String, MediaType>) -> Option<(&Strin
         return Some(json_like);
     }
     content.iter().next()
+}
+
+/// Which runtime codec to use for a given MIME. Decoded from the media
+/// type string in `preferred_media_type`'s return. Drives both the
+/// payload Rust type and the encode/decode rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CodecKind {
+    /// `application/json`, `application/*+json`. Encodes/decodes via
+    /// `serde_json` from a typed schema.
+    Json,
+    /// `application/x-www-form-urlencoded`. Encodes a serde-shaped
+    /// payload through `serde_urlencoded`. Decode side is unused —
+    /// no real-world API answers with form-urlencoded bodies.
+    Form,
+    /// `multipart/form-data`. Encodes a [`MultipartForm`] runtime
+    /// value the user assembles by hand (the spec's individual parts
+    /// don't fit one serde shape). Decode side is unused.
+    Multipart,
+    /// `application/octet-stream`, `*/*`, or any other binary MIME.
+    /// Payload type is `bytes::Bytes`.
+    Octet,
+    /// `text/plain` and other UTF-8 text MIMEs. Payload type is
+    /// `String`.
+    Text,
+}
+
+impl CodecKind {
+    /// Classifies a MIME string into a known runtime codec.
+    pub(crate) fn classify(mime: &str) -> Option<Self> {
+        let lower = mime.to_ascii_lowercase();
+        // Strip parameters (`text/plain; charset=utf-8` → `text/plain`).
+        let bare = lower
+            .split(';')
+            .next()
+            .map(str::trim)
+            .unwrap_or(lower.as_str());
+        match bare {
+            "application/json" => Some(Self::Json),
+            "application/x-www-form-urlencoded" => Some(Self::Form),
+            "multipart/form-data" => Some(Self::Multipart),
+            "application/octet-stream" | "*/*" => Some(Self::Octet),
+            other if other.ends_with("+json") => Some(Self::Json),
+            other if other.starts_with("text/") => Some(Self::Text),
+            other
+                if other.starts_with("image/")
+                    || other.starts_with("audio/")
+                    || other.starts_with("video/")
+                    || other == "application/pdf" =>
+            {
+                Some(Self::Octet)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Synthesises a PascalCase operation name. Prefers `operationId`; falls
@@ -782,12 +881,19 @@ fn render_security_extension(
 ///
 /// Operations without a request body cannot fail during encoding, so
 /// their `Error` associated type is [`::std::convert::Infallible`].
-/// Operations with a JSON body propagate `serde_json::Error`.
+/// Otherwise the codec dictates the error: `serde_json::Error` for
+/// JSON, `serde_urlencoded::ser::Error` for form, and `Infallible`
+/// for the byte / text / multipart codecs (their encoders never fail).
 fn make_request_error_ty(body: Option<&BodySlot>) -> syn::Type {
-    if body.is_some() {
-        parse_quote!(::serde_json::Error)
-    } else {
-        parse_quote!(::std::convert::Infallible)
+    let Some(body) = body else {
+        return parse_quote!(::std::convert::Infallible);
+    };
+    match body.codec {
+        CodecKind::Json => parse_quote!(::serde_json::Error),
+        CodecKind::Form => parse_quote!(::serde_urlencoded::ser::Error),
+        CodecKind::Octet | CodecKind::Text | CodecKind::Multipart => {
+            parse_quote!(::std::convert::Infallible)
+        }
     }
 }
 
@@ -1050,7 +1156,6 @@ fn render_one_header(slot: &ParamSlot) -> proc_macro2::TokenStream {
 /// `JsonEncoder::default()` — zero extra tokens for the common case.
 fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
     let encode_fn = crate::constants::runtime_body_codec_path("encode_body");
-    let encoder_ty = crate::constants::runtime_body_codec_path("json::JsonEncoder");
 
     let Some(body) = body else {
         return quote! {
@@ -1058,22 +1163,26 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
         };
     };
 
-    let encoder_expr = render_json_encoder_expr(&encoder_ty, &body.content_type);
+    let encoder_expr = render_encoder_expr(body);
+    let payload_expr = render_payload_expr(body);
     let field = &body.ident;
     if body.required {
         quote! {
-            #encode_fn(
-                &#encoder_expr,
-                &self.#field,
-                __request,
-            )
+            {
+                let __payload = &self.#field;
+                #encode_fn(
+                    &#encoder_expr,
+                    #payload_expr,
+                    __request,
+                )
+            }
         }
     } else {
         quote! {
             match &self.#field {
                 ::std::option::Option::Some(__payload) => #encode_fn(
                     &#encoder_expr,
-                    __payload,
+                    #payload_expr,
                     __request,
                 ),
                 ::std::option::Option::None => {
@@ -1084,26 +1193,78 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
     }
 }
 
-/// Constructs the `JsonEncoder` value for [`render_body_apply`].
+/// Picks how to project `__payload` (a borrow of the request body
+/// field) into the encoder's expected argument type.
 ///
-/// The common case (`application/json`) collapses to
-/// `JsonEncoder::default()` — zero extra tokens. Vendor MIMEs like
-/// `application/vnd.github+json` emit a struct-literal that overrides
-/// `content_type` so the wire Content-Type matches the spec. The call
-/// to `HeaderValue::from_static` is safe because OAS MIME strings are
-/// restricted to ASCII.
-fn render_json_encoder_expr(
+/// Most encoders take `&T`, so the default is `__payload`. The octet
+/// encoder takes an owned `Bytes` though — we clone (cheap; `Bytes` is
+/// Arc-backed) so the request struct isn't consumed.
+fn render_payload_expr(body: &BodySlot) -> proc_macro2::TokenStream {
+    match body.codec {
+        CodecKind::Octet => quote! { ::std::clone::Clone::clone(__payload) },
+        _ => quote! { __payload },
+    }
+}
+
+/// Constructs the encoder value used by [`render_body_apply`].
+///
+/// JSON / text / octet pick a per-codec encoder type and override
+/// `content_type` when the spec's MIME doesn't match the codec
+/// default. Form falls back to `FormEncoder::default()` (the MIME
+/// here is fixed). Multipart picks `MultipartEncoder::new()` so
+/// every request gets a fresh boundary.
+fn render_encoder_expr(body: &BodySlot) -> proc_macro2::TokenStream {
+    match body.codec {
+        CodecKind::Json => {
+            let ty = crate::constants::runtime_body_codec_path("json::JsonEncoder");
+            render_encoder_with_default_or_override(&ty, &body.content_type, "application/json")
+        }
+        CodecKind::Form => {
+            let ty = crate::constants::runtime_body_codec_path("form::FormEncoder");
+            quote! {
+                <#ty as ::std::default::Default>::default()
+            }
+        }
+        CodecKind::Multipart => {
+            let ty = crate::constants::runtime_body_codec_path("multipart::MultipartEncoder");
+            quote! { #ty::new() }
+        }
+        CodecKind::Octet => {
+            let ty = crate::constants::runtime_body_codec_path("octet::OctetEncoder");
+            render_encoder_with_default_or_override(
+                &ty,
+                &body.content_type,
+                "application/octet-stream",
+            )
+        }
+        CodecKind::Text => {
+            let ty = crate::constants::runtime_body_codec_path("text::TextEncoder");
+            render_encoder_with_default_or_override(
+                &ty,
+                &body.content_type,
+                "text/plain; charset=utf-8",
+            )
+        }
+    }
+}
+
+/// Helper for codecs whose encoder has a `content_type: HeaderValue`
+/// field. Emits `<Encoder>::default()` when the spec MIME matches the
+/// codec default, otherwise a struct-literal that overrides only the
+/// `content_type` field.
+fn render_encoder_with_default_or_override(
     encoder_ty: &syn::Path,
-    content_type: &str,
+    spec_mime: &str,
+    codec_default_mime: &str,
 ) -> proc_macro2::TokenStream {
-    if content_type.eq_ignore_ascii_case("application/json") {
+    if spec_mime.eq_ignore_ascii_case(codec_default_mime) {
         return quote! {
             <#encoder_ty as ::std::default::Default>::default()
         };
     }
     quote! {
         #encoder_ty {
-            content_type: ::http::HeaderValue::from_static(#content_type),
+            content_type: ::http::HeaderValue::from_static(#spec_mime),
             ..<#encoder_ty as ::std::default::Default>::default()
         }
     }
@@ -1121,7 +1282,7 @@ fn response_match_arm(variant: &ResponseVariant) -> Option<proc_macro2::TokenStr
     let status: u16 = variant.status.parse().ok()?;
     let variant_ident = &variant.variant_ident;
     let body_tokens = match &variant.inner_type {
-        Some(_) => decode_variant_body(quote! { Self::#variant_ident }),
+        Some(_) => decode_variant_body(variant, quote! { Self::#variant_ident }),
         None => quote! {
             ::std::mem::drop(__body);
             return ::std::result::Result::Ok(Self::#variant_ident);
@@ -1139,7 +1300,7 @@ fn default_fallback_tokens(
 ) -> proc_macro2::TokenStream {
     let variant_ident = &variant.variant_ident;
     match &variant.inner_type {
-        Some(_) => decode_variant_body(quote! { #response_ident::#variant_ident }),
+        Some(_) => decode_variant_body(variant, quote! { #response_ident::#variant_ident }),
         None => quote! {
             ::std::mem::drop(__body);
             return ::std::result::Result::Ok(#response_ident::#variant_ident);
@@ -1147,14 +1308,27 @@ fn default_fallback_tokens(
     }
 }
 
-/// Decodes `__body` through the JSON codec into the variant payload and
-/// returns the wrapping enum value. `constructor` is the tokenised path
-/// of the tuple-variant constructor (e.g. `Self::Status200` or
-/// `GetPetResponse::Default`).
-fn decode_variant_body(constructor: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+/// Decodes `__body` through the appropriate codec into the variant
+/// payload and returns the wrapping enum value. `constructor` is the
+/// tokenised path of the tuple-variant constructor (e.g.
+/// `Self::Status200` or `GetPetResponse::Default`).
+fn decode_variant_body(
+    variant: &ResponseVariant,
+    constructor: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
     let decode_error = crate::constants::runtime_path("DecodeError");
     let decode_body = crate::constants::runtime_body_codec_path("decode_body");
-    let decoder_ty = crate::constants::runtime_body_codec_path("json::JsonDecoder");
+    let decoder_ty = match variant.codec.unwrap_or(CodecKind::Json) {
+        CodecKind::Json => crate::constants::runtime_body_codec_path("json::JsonDecoder"),
+        CodecKind::Octet => crate::constants::runtime_body_codec_path("octet::OctetDecoder"),
+        CodecKind::Text => crate::constants::runtime_body_codec_path("text::TextDecoder"),
+        // Form / multipart responses don't exist in real APIs (no
+        // decoder is exported). `build_response_variants` already
+        // dropped `inner_type` for those, so we never reach here.
+        CodecKind::Form | CodecKind::Multipart => {
+            crate::constants::runtime_body_codec_path("json::JsonDecoder")
+        }
+    };
     quote! {
         let __decoder = <#decoder_ty as ::std::default::Default>::default();
         let __value = #decode_body(&__decoder, __body)
