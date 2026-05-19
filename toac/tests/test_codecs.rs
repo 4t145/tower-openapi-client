@@ -214,3 +214,217 @@ fn multipart_default_boundary_changes_per_encoder() {
     let b = MultipartEncoder::new();
     assert_ne!(a.boundary(), b.boundary());
 }
+
+// ---------------------------------------------------------------------------
+// NDJSON
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "ndjson")]
+mod ndjson_tests {
+    use ::bytes::Bytes;
+    use ::futures_util::StreamExt;
+    use ::http_body_util::Full;
+    use ::serde::Deserialize;
+    use ::toac::body::{
+        Body,
+        codec::{
+            BodyDecoder,
+            ndjson::{NdjsonDecodeError, NdjsonDecoder, NdjsonStream},
+        },
+    };
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Event {
+        id: u32,
+        name: String,
+    }
+
+    fn collect<O>(stream: NdjsonStream<O>) -> Vec<Result<O, NdjsonDecodeError>>
+    where
+        O: ::serde::de::DeserializeOwned + Send + 'static,
+    {
+        futures_executor::block_on(stream.collect())
+    }
+
+    #[test]
+    fn ndjson_yields_one_event_per_line() {
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}\n",
+        )));
+        let stream: NdjsonStream<Event> =
+            futures_executor::block_on(NdjsonDecoder.decode(body)).expect("decode");
+        let events: Vec<Event> = collect(stream).into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(
+            events,
+            vec![
+                Event {
+                    id: 1,
+                    name: "a".into()
+                },
+                Event {
+                    id: 2,
+                    name: "b".into()
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn ndjson_handles_trailing_line_without_newline() {
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"{\"id\":1,\"name\":\"a\"}\n{\"id\":2,\"name\":\"b\"}",
+        )));
+        let stream: NdjsonStream<Event> =
+            futures_executor::block_on(NdjsonDecoder.decode(body)).expect("decode");
+        let events: Vec<Event> = collect(stream).into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].id, 2);
+    }
+
+    #[test]
+    fn ndjson_skips_blank_lines_and_handles_crlf() {
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"{\"id\":1,\"name\":\"a\"}\r\n\r\n{\"id\":2,\"name\":\"b\"}\r\n",
+        )));
+        let stream: NdjsonStream<Event> =
+            futures_executor::block_on(NdjsonDecoder.decode(body)).expect("decode");
+        let events: Vec<Event> = collect(stream).into_iter().map(|r| r.unwrap()).collect();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn ndjson_propagates_per_line_decode_error() {
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"{\"id\":1,\"name\":\"a\"}\nnot-json\n{\"id\":3,\"name\":\"c\"}\n",
+        )));
+        let stream: NdjsonStream<Event> =
+            futures_executor::block_on(NdjsonDecoder.decode(body)).expect("decode");
+        let mut results = collect(stream).into_iter();
+        assert_eq!(results.next().unwrap().unwrap().id, 1);
+        let err = results.next().unwrap().unwrap_err();
+        assert!(matches!(err, NdjsonDecodeError::Json(_)));
+        assert_eq!(results.next().unwrap().unwrap().id, 3);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SSE
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "sse")]
+mod sse_tests {
+    use ::bytes::Bytes;
+    use ::futures_util::StreamExt;
+    use ::http_body_util::Full;
+    use ::toac::body::{
+        Body,
+        codec::{
+            BodyDecoder,
+            sse::{Sse, SseDecoder, SseEventStream},
+        },
+    };
+
+    fn collect(stream: SseEventStream) -> Vec<Sse> {
+        futures_executor::block_on(stream.collect::<Vec<_>>())
+            .into_iter()
+            .map(|res| res.expect("sse parse"))
+            .collect()
+    }
+
+    #[test]
+    fn sse_decodes_named_events_and_data() {
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"event: tick\ndata: hello\n\nevent: tick\ndata: world\n\n",
+        )));
+        let stream: SseEventStream =
+            futures_executor::block_on(SseDecoder.decode(body)).expect("decode");
+        let events = collect(stream);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event.as_deref(), Some("tick"));
+        assert_eq!(events[0].data.as_deref(), Some("hello"));
+        assert_eq!(events[1].data.as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn sse_default_event_when_unnamed() {
+        let body = Body::new(Full::new(Bytes::from_static(b"data: payload\n\n")));
+        let stream: SseEventStream =
+            futures_executor::block_on(SseDecoder.decode(body)).expect("decode");
+        let events = collect(stream);
+        assert_eq!(events.len(), 1);
+        assert!(events[0].event.is_none());
+        assert_eq!(events[0].data.as_deref(), Some("payload"));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// XML
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "xml")]
+mod xml_tests {
+    use super::body_bytes;
+    use ::bytes::Bytes;
+    use ::http_body_util::Full;
+    use ::serde::{Deserialize, Serialize};
+    use ::toac::body::{
+        Body,
+        codec::{
+            BodyContentType, BodyDecoder, BodyEncoder,
+            xml::{XmlDecodeError, XmlDecoder, XmlEncoder},
+        },
+    };
+
+    #[derive(Debug, PartialEq, Serialize, Deserialize)]
+    #[serde(rename = "Pet")]
+    struct Pet {
+        name: String,
+        age: u32,
+    }
+
+    #[test]
+    fn xml_encoder_serialises_with_quick_xml() {
+        let enc = XmlEncoder::default();
+        let pet = Pet {
+            name: "Milo".into(),
+            age: 3,
+        };
+        let body = enc.encode(&pet).expect("encode");
+        let bytes = body_bytes(body);
+        let rendered = std::str::from_utf8(bytes.as_ref()).expect("utf-8");
+        assert!(rendered.contains("<name>Milo</name>"), "{rendered}");
+        assert!(rendered.contains("<age>3</age>"), "{rendered}");
+        assert_eq!(enc.content_type().to_str().unwrap(), "application/xml");
+    }
+
+    #[test]
+    fn xml_encoder_content_type_is_overridable() {
+        let enc = XmlEncoder::with_content_type(::http::HeaderValue::from_static("text/xml"));
+        assert_eq!(enc.content_type().to_str().unwrap(), "text/xml");
+    }
+
+    #[test]
+    fn xml_decoder_round_trips() {
+        let dec = XmlDecoder;
+        let body = Body::new(Full::new(Bytes::from_static(
+            b"<Pet><name>Milo</name><age>3</age></Pet>",
+        )));
+        let pet: Pet = futures_executor::block_on(dec.decode(body)).expect("decode");
+        assert_eq!(
+            pet,
+            Pet {
+                name: "Milo".into(),
+                age: 3
+            }
+        );
+    }
+
+    #[test]
+    fn xml_decoder_reports_decode_error() {
+        let dec = XmlDecoder;
+        let body = Body::new(Full::new(Bytes::from_static(b"<Pet><name>Milo")));
+        let err = futures_executor::block_on(<XmlDecoder as BodyDecoder<Pet>>::decode(&dec, body))
+            .expect_err("incomplete xml");
+        assert!(matches!(err, XmlDecodeError::Xml(_)));
+    }
+}

@@ -323,7 +323,7 @@ impl<'a> Generator<'a> {
         //   (the spec's per-field schemas don't translate to a single
         //   serde shape; users assemble the form by hand).
         let inner_ty = match codec {
-            CodecKind::Json | CodecKind::Form => match media.schema.as_ref() {
+            CodecKind::Json | CodecKind::Form | CodecKind::Xml => match media.schema.as_ref() {
                 Some(schema_or_ref) => {
                     self.field_type_from_schema(parent, BODY_FIELD_NAME, schema_or_ref)?
                 }
@@ -334,6 +334,12 @@ impl<'a> Generator<'a> {
             CodecKind::Multipart => {
                 parse_quote!(::toac::body::codec::multipart::MultipartForm)
             }
+            // ndjson / SSE are response-side streaming codecs. Specs
+            // that nominate them for request bodies are malformed; drop
+            // the body silently and let the user notice via the missing
+            // payload field rather than blowing up codegen for the rest
+            // of the spec.
+            CodecKind::Ndjson | CodecKind::Sse => return Ok(None),
         };
 
         Ok(Some(BodySlot {
@@ -365,7 +371,7 @@ impl<'a> Generator<'a> {
                 Some((mime, media)) => {
                     let codec = CodecKind::classify(mime).unwrap_or(CodecKind::Json);
                     let ty = match codec {
-                        CodecKind::Json => match media.schema.as_ref() {
+                        CodecKind::Json | CodecKind::Xml => match media.schema.as_ref() {
                             Some(schema_or_ref) => Some(self.field_type_from_schema(
                                 enum_ident,
                                 &format!("{variant_ident}Body"),
@@ -378,6 +384,26 @@ impl<'a> Generator<'a> {
                         // Form / multipart responses don't exist in real
                         // APIs (see codec doc); treat them as opaque.
                         CodecKind::Form | CodecKind::Multipart => None,
+                        CodecKind::Ndjson => match media.schema.as_ref() {
+                            Some(schema_or_ref) => {
+                                let inner = self.field_type_from_schema(
+                                    enum_ident,
+                                    &format!("{variant_ident}Body"),
+                                    schema_or_ref,
+                                )?;
+                                Some(parse_quote!(
+                                    ::toac::body::codec::ndjson::NdjsonStream<#inner>
+                                ))
+                            }
+                            // No schema → hand the user the raw line
+                            // payload as `serde_json::Value`.
+                            None => Some(parse_quote!(
+                                ::toac::body::codec::ndjson::NdjsonStream<::serde_json::Value>
+                            )),
+                        },
+                        CodecKind::Sse => {
+                            Some(parse_quote!(::toac::body::codec::sse::SseEventStream))
+                        }
                     };
                     (ty, Some(codec))
                 }
@@ -560,6 +586,18 @@ pub(crate) enum CodecKind {
     /// `text/plain` and other UTF-8 text MIMEs. Payload type is
     /// `String`.
     Text,
+    /// `application/xml`, `text/xml`, `application/*+xml`. Encodes /
+    /// decodes through `quick_xml` from a serde-shaped schema. Gated
+    /// behind the runtime's `xml` feature.
+    Xml,
+    /// `application/x-ndjson`, `application/jsonl`. Decode-only — the
+    /// decoded payload is an `NdjsonStream<T>` over the schema type.
+    /// Gated behind the runtime's `ndjson` feature.
+    Ndjson,
+    /// `text/event-stream`. Decode-only — the decoded payload is an
+    /// `SseEventStream` of raw `Sse` events. Gated behind the runtime's
+    /// `sse` feature.
+    Sse,
 }
 
 impl CodecKind {
@@ -576,8 +614,14 @@ impl CodecKind {
             "application/json" => Some(Self::Json),
             "application/x-www-form-urlencoded" => Some(Self::Form),
             "multipart/form-data" => Some(Self::Multipart),
+            "application/xml" | "text/xml" => Some(Self::Xml),
+            "application/x-ndjson" | "application/jsonl" | "application/ndjson" => {
+                Some(Self::Ndjson)
+            }
+            "text/event-stream" => Some(Self::Sse),
             "application/octet-stream" | "*/*" => Some(Self::Octet),
             other if other.ends_with("+json") => Some(Self::Json),
+            other if other.ends_with("+xml") => Some(Self::Xml),
             other if other.starts_with("text/") => Some(Self::Text),
             other
                 if other.starts_with("image/")
@@ -891,8 +935,15 @@ fn make_request_error_ty(body: Option<&BodySlot>) -> syn::Type {
     match body.codec {
         CodecKind::Json => parse_quote!(::serde_json::Error),
         CodecKind::Form => parse_quote!(::serde_urlencoded::ser::Error),
+        CodecKind::Xml => parse_quote!(::toac::body::codec::xml::XmlEncodeError),
         CodecKind::Octet | CodecKind::Text | CodecKind::Multipart => {
             parse_quote!(::std::convert::Infallible)
+        }
+        // `collect_request_body` rejects ndjson/sse before they reach
+        // here, so the request struct never carries a body of these
+        // codecs. Mark unreachable to surface bugs loudly.
+        CodecKind::Ndjson | CodecKind::Sse => {
+            unreachable!("ndjson/sse codecs are response-only")
         }
     }
 }
@@ -1246,6 +1297,15 @@ fn render_encoder_expr(body: &BodySlot) -> proc_macro2::TokenStream {
                 "text/plain; charset=utf-8",
             )
         }
+        CodecKind::Xml => {
+            let ty = crate::constants::runtime_body_codec_path("xml::XmlEncoder");
+            render_encoder_with_default_or_override(&ty, &body.content_type, "application/xml")
+        }
+        // Decode-only codecs — `collect_request_body` rejects them
+        // before the generator builds an encoder expression.
+        CodecKind::Ndjson | CodecKind::Sse => {
+            unreachable!("ndjson/sse codecs are response-only")
+        }
     }
 }
 
@@ -1323,6 +1383,9 @@ fn decode_variant_body(
         CodecKind::Json => crate::constants::runtime_body_codec_path("json::JsonDecoder"),
         CodecKind::Octet => crate::constants::runtime_body_codec_path("octet::OctetDecoder"),
         CodecKind::Text => crate::constants::runtime_body_codec_path("text::TextDecoder"),
+        CodecKind::Xml => crate::constants::runtime_body_codec_path("xml::XmlDecoder"),
+        CodecKind::Ndjson => crate::constants::runtime_body_codec_path("ndjson::NdjsonDecoder"),
+        CodecKind::Sse => crate::constants::runtime_body_codec_path("sse::SseDecoder"),
         // Form / multipart responses don't exist in real APIs (no
         // decoder is exported). `build_response_variants` already
         // dropped `inner_type` for those, so we never reach here.

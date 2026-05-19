@@ -14,8 +14,14 @@ use crate::{BoxError, Request, body::Body};
 pub mod form;
 pub mod json;
 pub mod multipart;
+#[cfg(feature = "ndjson")]
+pub mod ndjson;
 pub mod octet;
+#[cfg(feature = "sse")]
+pub mod sse;
 pub mod text;
+#[cfg(feature = "xml")]
+pub mod xml;
 
 /// Encodes `data` into `request`'s body and sets its `Content-Type`.
 ///

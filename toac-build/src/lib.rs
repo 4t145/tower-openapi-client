@@ -71,11 +71,13 @@ pub fn build_with(
     generator.emit_servers()?;
     generator.emit_security()?;
 
+    let metadata = docs::spec_metadata_docs(spec);
     let components = generator.finish_components();
     let operations = generator.finish_operations();
     let servers = generator.finish_servers();
     let security = generator.finish_security();
     Ok(quote::quote! {
+        #metadata
         #components
         #operations
         #servers

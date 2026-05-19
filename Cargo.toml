@@ -40,6 +40,9 @@ syn = { version = "2", features = ["full", "visit-mut"] }
 base64 = "0.22"
 percent-encoding = "2"
 serde_urlencoded = "0.7"
+quick-xml = { version = "0.40", features = ["serialize"] }
+sse-stream = "0.2"
+futures-util = "0.3"
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false }
 # Dev / tooling.

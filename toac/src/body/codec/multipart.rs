@@ -27,7 +27,7 @@ use crate::body::{
 };
 
 /// One part of a multipart/form-data body.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Part {
     /// `name=` value in the part's `Content-Disposition` header.
     pub name: String,
@@ -93,7 +93,7 @@ impl Part {
 
 /// A sequence of parts ready to be encoded. Construct through
 /// [`MultipartForm::builder`] or [`MultipartForm::from_parts`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MultipartForm {
     parts: Vec<Part>,
 }
@@ -117,7 +117,7 @@ impl MultipartForm {
 
 /// Builder that accumulates parts before freezing into a
 /// [`MultipartForm`].
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MultipartFormBuilder {
     parts: Vec<Part>,
 }

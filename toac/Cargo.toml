@@ -22,6 +22,12 @@ base64 = { workspace = true }
 percent-encoding = { workspace = true }
 # `application/x-www-form-urlencoded` codec.
 serde_urlencoded = { workspace = true }
+# Optional `application/xml` / `text/xml` codec.
+quick-xml = { workspace = true, optional = true }
+# Stream adapters used by the optional ndjson and sse codecs.
+futures-util = { workspace = true, optional = true }
+# Optional Server-Sent Events codec.
+sse-stream = { workspace = true, optional = true }
 tracing = { workspace = true }
 # Optional `reqwest` backend adapter. Brings reqwest only when the
 # `reqwest` feature is on; the runtime itself stays transport-agnostic.
@@ -43,3 +49,12 @@ base64 = []
 # turning a `reqwest::Client` into a `tower::Service<toac::Request>` that
 # `ApiClient::new` can wrap.
 reqwest = ["dep:reqwest"]
+# Enables the `application/xml` / `text/xml` codec backed by quick-xml.
+xml = ["dep:quick-xml"]
+# Enables the `application/x-ndjson` / `application/jsonl` streaming
+# decoder. The encoder side is intentionally absent — request bodies in
+# OAS specs don't use these MIMEs.
+ndjson = ["dep:futures-util"]
+# Enables the `text/event-stream` (Server-Sent Events) streaming
+# decoder, backed by `sse-stream`.
+sse = ["dep:futures-util", "dep:sse-stream"]
