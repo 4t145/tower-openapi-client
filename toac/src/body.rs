@@ -13,17 +13,24 @@ pub mod codec;
 use std::pin::Pin;
 use std::task::Poll;
 
-use http_body_util::{BodyExt, combinators::UnsyncBoxBody};
+use http_body_util::{BodyExt, combinators::BoxBody as InnerBoxBody};
 
 /// Internal boxed body; errors are erased into [`crate::BoxError`].
-type BoxBody = UnsyncBoxBody<::bytes::Bytes, crate::BoxError>;
+///
+/// `Sync` is required because mainstream HTTP backends
+/// (`reqwest::Body`, `axum::body::Body`, the bodies plumbed by
+/// `tower-http` middleware) all want `Send + Sync`. Picking the `Sync`
+/// variant up front means generated code and adapter layers never have
+/// to thread `!Sync` through Tower middleware.
+type BoxBody = InnerBoxBody<::bytes::Bytes, crate::BoxError>;
 
 /// Unified request / response body.
 ///
 /// Represents either an empty body or an erased streaming body whose
 /// frames carry [`bytes::Bytes`]. Anything that implements
-/// `http_body::Body<Data = bytes::Bytes>` with an error convertible
-/// into [`crate::BoxError`] can be wrapped through [`Body::new`].
+/// `http_body::Body<Data = bytes::Bytes> + Send + Sync` with an error
+/// convertible into [`crate::BoxError`] can be wrapped through
+/// [`Body::new`].
 #[derive(Debug)]
 pub struct Body {
     kind: Kind,
@@ -54,7 +61,7 @@ impl Body {
     /// [`Body::empty`].
     pub fn new<B>(mut body: B) -> Self
     where
-        B: http_body::Body<Data = bytes::Bytes> + Send + 'static,
+        B: http_body::Body<Data = bytes::Bytes> + Send + Sync + 'static,
         B::Error: Into<crate::BoxError>,
     {
         if body.is_end_stream() {
@@ -69,7 +76,7 @@ impl Body {
             return Self::from_kind(Kind::Wrap(std::mem::take(body)));
         }
 
-        let body = body.map_err(Into::into).boxed_unsync();
+        let body = body.map_err(Into::into).boxed();
 
         Self::from_kind(Kind::Wrap(body))
     }

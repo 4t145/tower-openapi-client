@@ -87,7 +87,7 @@ impl BodyDecoder<String> for TextDecoder {
 
     async fn decode<B>(&self, body: B) -> Result<String, Self::Error>
     where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B: http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>,
     {
         let bytes = body

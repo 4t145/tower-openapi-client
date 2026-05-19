@@ -41,6 +41,7 @@ base64 = "0.22"
 percent-encoding = "2"
 serde_urlencoded = "0.7"
 tracing = "0.1"
+reqwest = { version = "0.12", default-features = false }
 # Dev / tooling.
 anyhow = "1"
 chrono = { version = "0.4", features = ["serde"] }
@@ -49,3 +50,4 @@ tokio = { version = "1", features = ["full"] }
 indoc = "2"
 prettyplease = "0.2"
 uuid = { version = "1", features = ["serde"] }
+wiremock = "0.6"

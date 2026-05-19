@@ -77,7 +77,7 @@ pub trait BodyEncoder<T>: BodyContentType {
 pub async fn decode_body<D, B, O>(decoder: &D, body: B) -> Result<O, D::Error>
 where
     D: BodyDecoder<O>,
-    B: http_body::Body<Data = Bytes> + Send + 'static,
+    B: http_body::Body<Data = Bytes> + Send + Sync + 'static,
     B::Error: Into<BoxError>,
 {
     decoder.decode(body).await
@@ -102,6 +102,6 @@ pub trait BodyDecoder<O> {
     /// failure.
     fn decode<B>(&self, body: B) -> impl Future<Output = Result<O, Self::Error>> + Send
     where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B: http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>;
 }

@@ -55,7 +55,7 @@ where
     type Error = JsonDecodeError;
     async fn decode<B>(&self, body: B) -> Result<O, Self::Error>
     where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B: http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>,
     {
         let reader = body

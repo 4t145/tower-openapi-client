@@ -30,6 +30,7 @@ use std::{
 };
 
 pub mod body;
+pub mod compat;
 mod error;
 mod request;
 mod response;
@@ -95,7 +96,7 @@ pub trait ParseResponse: Sized {
         response: ::http::Response<B>,
     ) -> impl Future<Output = Result<Self, Self::Error>> + Send
     where
-        B: http_body::Body<Data = ::bytes::Bytes> + Send + 'static,
+        B: http_body::Body<Data = ::bytes::Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>;
 }
 
@@ -248,7 +249,7 @@ where
     S: tower::Service<Request, Response = ::http::Response<B>> + Clone + Send + 'static,
     S::Future: Send + 'static,
     S::Error: Send + 'static,
-    B: http_body::Body<Data = ::bytes::Bytes> + Send + 'static,
+    B: http_body::Body<Data = ::bytes::Bytes> + Send + Sync + 'static,
     B::Error: Into<BoxError>,
 {
     type Response = Op::Response;

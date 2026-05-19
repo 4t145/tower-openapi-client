@@ -23,13 +23,23 @@ percent-encoding = { workspace = true }
 # `application/x-www-form-urlencoded` codec.
 serde_urlencoded = { workspace = true }
 tracing = { workspace = true }
+# Optional `reqwest` backend adapter. Brings reqwest only when the
+# `reqwest` feature is on; the runtime itself stays transport-agnostic.
+reqwest = { workspace = true, optional = true }
 [dev-dependencies]
 anyhow = { workspace = true }
 futures-executor = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
+tokio = { workspace = true }
+wiremock = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
 
 [features]
 # Enables `Base64String`, which wraps `bytes::Bytes` and projects to/from
 # standard base64 at serde / display boundaries. Required when generated
 # code uses `BuildOptions::use_base64_string = true`.
 base64 = []
+# Enables the `reqwest` backend adapter (`toac::reqwest::ReqwestService`),
+# turning a `reqwest::Client` into a `tower::Service<toac::Request>` that
+# `ApiClient::new` can wrap.
+reqwest = ["dep:reqwest"]

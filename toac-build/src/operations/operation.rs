@@ -973,6 +973,7 @@ fn build_parse_response_impl(
             where
                 __B: ::http_body::Body<Data = ::bytes::Bytes>
                     + ::std::marker::Send
+                    + ::std::marker::Sync
                     + 'static,
                 __B::Error: ::std::convert::Into<#box_error>,
             {

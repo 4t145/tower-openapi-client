@@ -90,7 +90,7 @@ impl BodyDecoder<Bytes> for OctetDecoder {
 
     async fn decode<B>(&self, body: B) -> Result<Bytes, Self::Error>
     where
-        B: http_body::Body<Data = Bytes> + Send + 'static,
+        B: http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>,
     {
         let collected = body

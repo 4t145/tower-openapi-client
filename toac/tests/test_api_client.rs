@@ -67,7 +67,7 @@ impl ParseResponse for GetPetResponse {
         response: ::http::Response<B>,
     ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send
     where
-        B: ::http_body::Body<Data = Bytes> + Send + 'static,
+        B: ::http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>,
     {
         async move {
@@ -257,7 +257,7 @@ impl ParseResponse for ProtectedResponse {
         response: ::http::Response<B>,
     ) -> impl ::std::future::Future<Output = Result<Self, Self::Error>> + Send
     where
-        B: ::http_body::Body<Data = Bytes> + Send + 'static,
+        B: ::http_body::Body<Data = Bytes> + Send + Sync + 'static,
         B::Error: Into<BoxError>,
     {
         async move {
