@@ -1,3 +1,5 @@
+pub mod parameter;
+
 /// HTTP request type produced by [`crate::MakeRequest`] implementations.
 ///
 /// Fixing the body to [`crate::body::Body`] keeps generated code

@@ -32,7 +32,7 @@ use std::{
 pub mod body;
 pub mod compat;
 mod error;
-mod request;
+pub mod request;
 mod response;
 pub mod security;
 mod server;
