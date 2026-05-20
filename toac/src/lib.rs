@@ -37,7 +37,7 @@ mod response;
 pub mod security;
 mod server;
 
-pub use error::BoxError;
+pub use error::{BoxError, EncodeRequestError};
 pub use request::Request;
 pub use response::Response;
 pub use security::{AuthSelector, NoAuth, OperationSecurity, SecurityCredential};

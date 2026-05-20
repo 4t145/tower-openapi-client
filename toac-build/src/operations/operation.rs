@@ -5,7 +5,8 @@ use std::collections::BTreeMap;
 
 use http::Method;
 use oas3::spec::{
-    MediaType, ObjectOrReference, ObjectSchema, Operation, Parameter, ParameterIn, PathItem,
+    MediaType, ObjectOrReference, ObjectSchema, Operation, Parameter, ParameterIn, ParameterStyle,
+    PathItem,
 };
 use quote::quote;
 use syn::parse_quote;
@@ -281,10 +282,14 @@ impl<'a> Generator<'a> {
                 None => parse_quote!(::serde_json::Value),
             };
 
+            let style = resolve_style(&parameter);
+            let explode = resolve_explode(&parameter, style);
             slots.push(ParamSlot {
                 field_ident,
                 parameter,
                 inner_ty,
+                style,
+                explode,
             });
         }
         Ok(slots)
@@ -444,6 +449,13 @@ struct ParamSlot {
     /// Rust type *before* `Option<...>` wrapping. The wrapping is added
     /// at struct-build time when the parameter is optional.
     inner_ty: syn::Type,
+    /// Resolved wire style (spec-supplied or OAS default for the
+    /// parameter's location). Drives the codegen path of
+    /// [`render_one_query`].
+    style: ParameterStyle,
+    /// Resolved explode flag (spec-supplied or OAS default — `true`
+    /// when style is `form`, `false` otherwise).
+    explode: bool,
 }
 
 impl ParamSlot {
@@ -516,6 +528,25 @@ fn upsert_parameter(into: &mut Vec<Parameter>, incoming: Parameter) {
         return;
     }
     into.push(incoming);
+}
+
+/// Picks the effective wire style for a parameter, applying the OAS
+/// per-location default when the spec leaves `style` unset (per
+/// <https://spec.openapis.org/oas/v3.1.1#parameter-object>: `query` /
+/// `cookie` default to `form`, `path` / `header` default to `simple`).
+fn resolve_style(parameter: &Parameter) -> ParameterStyle {
+    parameter.style.unwrap_or(match parameter.location {
+        ParameterIn::Query | ParameterIn::Cookie => ParameterStyle::Form,
+        ParameterIn::Path | ParameterIn::Header => ParameterStyle::Simple,
+    })
+}
+
+/// Picks the effective `explode` flag, applying the OAS default
+/// (`true` for `form`, `false` for everything else).
+fn resolve_explode(parameter: &Parameter, style: ParameterStyle) -> bool {
+    parameter
+        .explode
+        .unwrap_or(matches!(style, ParameterStyle::Form))
 }
 
 /// Tail-facing parameter data used to construct one struct field.
@@ -868,12 +899,12 @@ fn build_make_request_impl(
     let path_rendering = render_path_statements(path, params);
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
-    let body_apply = render_body_apply(body);
+    let body_apply = render_body_apply(body, params);
     let security_rendering = render_security_extension(security);
     let make_request = crate::constants::runtime_path("MakeRequest");
     let request_ty = crate::constants::runtime_path("Request");
     let body_ty = crate::constants::runtime_body_path();
-    let error_ty = make_request_error_ty(body);
+    let error_ty = make_request_error_ty(body, params);
 
     parse_quote! {
         impl #make_request for #request_ident {
@@ -923,12 +954,23 @@ fn render_security_extension(
 
 /// Error type used by the generated `MakeRequest` impl.
 ///
-/// Operations without a request body cannot fail during encoding, so
-/// their `Error` associated type is [`::std::convert::Infallible`].
-/// Otherwise the codec dictates the error: `serde_json::Error` for
-/// JSON, `serde_urlencoded::ser::Error` for form, and `Infallible`
-/// for the byte / text / multipart codecs (their encoders never fail).
-fn make_request_error_ty(body: Option<&BodySlot>) -> syn::Type {
+/// The picked type follows the failure surface of the op:
+/// - No body and no query parameters → no encoding step can fail, so
+///   the type is [`::std::convert::Infallible`].
+/// - Query parameters present → the runtime
+///   [`encode_serialized`][toac::request::parameter::encode_serialized]
+///   helper raises a heterogeneous error, so the op's error widens to
+///   [`toac::BoxError`] and other codec errors are erased into it.
+/// - Body only (no query) → the codec dictates the type:
+///   `serde_json::Error` for JSON, `serde_urlencoded::ser::Error` for
+///   form, and `Infallible` for the byte / text / multipart codecs.
+fn make_request_error_ty(body: Option<&BodySlot>, params: &[ParamSlot]) -> syn::Type {
+    let has_query_params = params
+        .iter()
+        .any(|p| p.parameter.location == ParameterIn::Query);
+    if has_query_params {
+        return parse_quote!(::toac::EncodeRequestError);
+    }
     let Some(body) = body else {
         return parse_quote!(::std::convert::Infallible);
     };
@@ -1078,7 +1120,13 @@ fn render_path_statements(path: &str, params: &[ParamSlot]) -> proc_macro2::Toke
     stmts
 }
 
-/// Statements that append query parameters to `__path`.
+/// Statements that append query parameters to `__path` through the
+/// runtime's [`encode_serialized`] helper.
+///
+/// The local `__query_first` flag threads through every parameter so
+/// the encoder picks `?` vs `&` correctly; encoder errors propagate
+/// out of the async block as the op's [`MakeRequest::Error`] type
+/// (see [`make_request_error_ty`]).
 fn render_query_statements(params: &[ParamSlot]) -> proc_macro2::TokenStream {
     let queries: Vec<&ParamSlot> = params
         .iter()
@@ -1100,57 +1148,63 @@ fn render_query_statements(params: &[ParamSlot]) -> proc_macro2::TokenStream {
 fn render_one_query(slot: &ParamSlot) -> proc_macro2::TokenStream {
     let field = &slot.field_ident;
     let wire = slot.parameter.name.as_str();
-    // Scalar fields stringify directly; array-shaped fields expand to
-    // repeated `?key=a&key=b` entries, matching OAS's default
-    // `style=form, explode=true` for query parameters. A full
-    // `style`/`explode` implementation is still TODO.
-    let append = if is_vec_type(&slot.inner_ty) {
-        quote! {
-            for __item in __value.iter() {
-                let __sep = if __query_first { '?' } else { '&' };
-                __query_first = false;
-                __path.push(__sep);
-                __path.push_str(#wire);
-                __path.push('=');
-                __path.push_str(&::std::string::ToString::to_string(__item));
-            }
-        }
-    } else {
-        quote! {
-            let __sep = if __query_first { '?' } else { '&' };
-            __query_first = false;
-            __path.push(__sep);
-            __path.push_str(#wire);
-            __path.push('=');
-            __path.push_str(&::std::string::ToString::to_string(&__value));
-        }
+    let style_tokens = parameter_style_tokens(slot.style);
+    let location_tokens = parameter_in_tokens(slot.parameter.location);
+    let explode = slot.explode;
+    let encode_call = quote! {
+        ::toac::request::parameter::encode_serialized(
+            &mut __path,
+            #wire,
+            __value,
+            #style_tokens,
+            #explode,
+            #location_tokens,
+            &mut __query_first,
+        )
+        .map_err(::toac::EncodeRequestError::new)?;
     };
 
     if slot.is_required() {
         quote! {
             {
                 let __value = &self.#field;
-                #append
+                #encode_call
             }
         }
     } else {
         quote! {
             if let ::std::option::Option::Some(__value) = &self.#field {
-                #append
+                #encode_call
             }
         }
     }
 }
 
-/// Returns `true` if `ty` is a `Vec<_>` (plain or path-qualified).
-fn is_vec_type(ty: &syn::Type) -> bool {
-    let syn::Type::Path(path) = ty else {
-        return false;
+/// Tokens for a [`oas3::spec::ParameterStyle`] in the runtime's
+/// [`toac::request::parameter::ParameterStyle`] namespace.
+fn parameter_style_tokens(style: ParameterStyle) -> proc_macro2::TokenStream {
+    let variant = match style {
+        ParameterStyle::Matrix => quote! { Matrix },
+        ParameterStyle::Label => quote! { Label },
+        ParameterStyle::Form => quote! { Form },
+        ParameterStyle::Simple => quote! { Simple },
+        ParameterStyle::SpaceDelimited => quote! { SpaceDelimited },
+        ParameterStyle::PipeDelimited => quote! { PipeDelimited },
+        ParameterStyle::DeepObject => quote! { DeepObject },
     };
-    path.path
-        .segments
-        .last()
-        .is_some_and(|seg| seg.ident == "Vec")
+    quote! { ::toac::request::parameter::ParameterStyle::#variant }
+}
+
+/// Tokens for a [`oas3::spec::ParameterIn`] in the runtime's
+/// [`toac::request::parameter::ParameterIn`] namespace.
+fn parameter_in_tokens(location: ParameterIn) -> proc_macro2::TokenStream {
+    let variant = match location {
+        ParameterIn::Query => quote! { Query },
+        ParameterIn::Header => quote! { Header },
+        ParameterIn::Path => quote! { Path },
+        ParameterIn::Cookie => quote! { Cookie },
+    };
+    quote! { ::toac::request::parameter::ParameterIn::#variant }
 }
 
 /// Statements that set header parameters on `__builder`.
@@ -1206,8 +1260,14 @@ fn render_one_header(slot: &ParamSlot) -> proc_macro2::TokenStream {
 /// small builder block so the encoder emits the exact vendor MIME
 /// (e.g. `application/vnd.github+json`). Plain JSON still uses
 /// `JsonEncoder::default()` — zero extra tokens for the common case.
-fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
+fn render_body_apply(body: Option<&BodySlot>, params: &[ParamSlot]) -> proc_macro2::TokenStream {
     let encode_fn = crate::constants::runtime_body_codec_path("encode_body");
+    // When the op widens its error to `EncodeRequestError` (because it
+    // also encodes query parameters), the body codec's native error
+    // doesn't match — wrap the codec result so both arms agree.
+    let needs_wrapping = params
+        .iter()
+        .any(|p| p.parameter.location == ParameterIn::Query);
 
     let Some(body) = body else {
         return quote! {
@@ -1218,25 +1278,40 @@ fn render_body_apply(body: Option<&BodySlot>) -> proc_macro2::TokenStream {
     let encoder_expr = render_encoder_expr(body);
     let payload_expr = render_payload_expr(body);
     let field = &body.ident;
+    let wrap = |call: proc_macro2::TokenStream| {
+        if needs_wrapping {
+            quote! {
+                #call.map_err(::toac::EncodeRequestError::new)
+            }
+        } else {
+            call
+        }
+    };
     if body.required {
+        let inner = wrap(quote! {
+            #encode_fn(
+                &#encoder_expr,
+                #payload_expr,
+                __request,
+            )
+        });
         quote! {
             {
                 let __payload = &self.#field;
-                #encode_fn(
-                    &#encoder_expr,
-                    #payload_expr,
-                    __request,
-                )
+                #inner
             }
         }
     } else {
+        let inner = wrap(quote! {
+            #encode_fn(
+                &#encoder_expr,
+                #payload_expr,
+                __request,
+            )
+        });
         quote! {
             match &self.#field {
-                ::std::option::Option::Some(__payload) => #encode_fn(
-                    &#encoder_expr,
-                    #payload_expr,
-                    __request,
-                ),
+                ::std::option::Option::Some(__payload) => #inner,
                 ::std::option::Option::None => {
                     ::std::result::Result::Ok(__request)
                 }

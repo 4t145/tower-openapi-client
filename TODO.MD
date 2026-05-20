@@ -91,6 +91,113 @@ responses / headers / examples / links / callbacks / pathItems）目前
 
 ---
 
+## 已知 BUG（codegen 缺陷）
+
+通过对 `examples/openai-openapi`（OpenAI v2.3.0）和 `examples/github-openapi`
+（GitHub `api.github.com.yaml`）两份真实 spec 的回归发现，按严重度排列：
+
+### B1 — Response enum 命名遮蔽（已修复）
+
+- **症状**：`error[E0072] recursive type ... has infinite size`，`E0391
+  cycle detected when computing ... needs drop`。
+- **复现**：OpenAI 的 `POST /responses`、`GET /responses/{id}`、
+  `POST /responses/{id}/cancel`。这三个 op 自身被命名为 `Response`，
+  且 200 响应 `$ref: '#/components/schemas/Response'`。
+- **真实根因**：不是递归类型问题，是**命名遮蔽**。op 模块自动生成
+  `pub enum Response { Status200(Response) }`，variant 里的裸 `Response`
+  在词法作用域内解析回 enum 自身，于是 rustc 认为它真递归。
+  `operations.rs::QualifyComponents` 本意把 component 引用 qualify 成
+  `crate::components::Foo`，但用 `skip_idents` 跳过了所有 op 类型名
+  ——当 op 名和 component 名重合时（`Response` 这种）就误 skip。
+- **修复**：把 component ref 的绝对路径化下沉到源头
+  (`Generator::qualify_for_current_stage` in `components/schema.rs`)。
+  在 operations 阶段调用 `inline_type` / `build_sum_variant` 时，凡是
+  从 `ensure_named_schema` 拿到的裸 `Foo` 一律返回
+  `crate::components::Foo`。op 私有类型（`Request`/`Response`）走
+  bare ident 不变。同时把 `QualifyComponents` rewriter 整个删掉
+  ——源头修对之后它已无作用。
+- **回归测试**：`tests/test_operations.rs::op_response_payload_qualified_when_component_shares_name`。
+
+### B2 — Query 参数渲染对所有类型直接 `ToString::to_string`（已修复）
+
+- **症状**：`error[E0277] the trait bound &T: ToString is not satisfied`，
+  其中 `T` 包含 `components::Metadata`（对象）、`HashMap<String, String>`、
+  `RequestEffectiveAt`（自定义 anyOf 类型）等。
+- **复现**：OpenAI 多个 op，例如 `listEvents` 之类带 `metadata` 对象
+  query 参数的 endpoint。
+- **根因**：`operations/operation.rs` 在 query 参数 push 时一律走
+  `::std::string::ToString::to_string(&value)`，假设值实现 `Display`。
+  但 OpenAPI 允许把 object / map / 复合 schema 也声明成 query 参数
+  （配合 `style: deepObject` 之类的 `explode`），需要 form-explode 或
+  JSON 字符串化等不同序列化策略。
+- **修复**：在 `toac::request::parameter` 加运行时编码器
+  (`encode_serialized` / `encode_serialized_value`)，按 OAS
+  `(style, explode, location)` 把任意 `Serialize` 值正规化为
+  scalar / array / object 投影后调用 RFC 6570 编码器。codegen 端把
+  blanket `ToString` 路径替换为该编码器调用，并把 op 的
+  `MakeRequest::Error` 在出现 query 参数时拓宽为
+  `toac::EncodeRequestError`（包装 `BoxError` 的具名错误类型）。
+- **回归测试**：
+  `tests/test_runtime_codegen.rs::object_query_param_uses_runtime_encoder`、
+  `toac/src/request/parameter/test.rs` 33 例 RFC 6570 + OAS 黄金路径。
+
+### B3 — string schema 的 enum 含 `null` 字面量直接 panic（生成阶段崩溃）
+
+- **症状**：`thread 'main' panicked at toac-build/...: unsupported feature:
+  non-string enum variant in string schema: null`。整个 build script
+  退出，看不到后续问题。
+- **复现**：GitHub `api.github.com.yaml` 在 codegen 阶段立刻爆。OAS 3.1 /
+  JSON Schema 2020-12 允许 `type: string, enum: [..., null]` 与
+  `nullable` 等价表达。
+- **根因**：components/schema 里 string-enum 渲染分支只接受字符串字面量
+  variant；遇到 `null` 直接 unsupported。
+- **修复方向**：把 `null` variant 提升为 schema 级别的 nullable 标记
+  （即从 enum 列表里剔除 `null` 并把外层包成 `Option<T>`）。也可视作
+  和 `nullable: true`（3.0）→ `Option<T>` 的同源修复。
+
+### B4 — `Response` 取首选 media type 时不区分流式与非流式
+
+- **症状**（非编译错误，但语义偏差）：op 同时声明
+  `application/json` + `text/event-stream` 的 200 时，生成器永远选
+  JSON 分支，SSE 通路在 `Response` enum 里没有体现。
+- **复现**：OpenAI 的 `POST /chat/completions`、`POST /responses`、
+  `POST /audio/transcriptions`。
+- **根因**：`preferred_media_type` 把 `application/json` 一律置顶，无视
+  spec 里同 status 的多 representation 是"客户端用 Accept 决定"的语义。
+- **修复方向**（待讨论）：要么把同 status 的不同 content type 拆成两个
+  variant（`Status200Json(...)` / `Status200Sse(...)`），要么提供
+  `Request::with_accept(...)` 让 codec 选择延迟到运行时。前者更显式但
+  改 enum API；后者更接近真实使用习惯。
+
+### B5 — 解析层对 OAS 3.0 兼容写法零容忍（spec 兼容性，可能属 oas3 而非本仓）
+
+不是本仓 codegen 的 bug，但实际遇到时是阻塞的。先记录，迁移上游或加
+预处理时复用：
+
+- 数值字面量超 `i64`（OpenAI `seed.minimum/maximum: ±9.22e18`）→
+  `oas3` 报 `invalid type: integer ... as i128, expected any value`。
+- `exclusiveMinimum: true` / `exclusiveMaximum: true`（OAS 3.0 布尔形
+  式）→ `oas3` 在 OAS 3.1 模式下报 `data did not match any variant of
+  untagged enum ObjectOrReference`，定位极差。
+- `min_items` / `max_items` snake_case 拼写（spec 笔误）→ 同上。
+
+`examples/openai/build.rs` 里目前用三段就地 `String::replace` 兜底，作为
+临时方案。长期看：要么向 `oas3` 上游提 PR 放宽，要么我们提供一个
+"宽松解析模式"的预处理层，集中容错。
+
+### 影响面与优先级
+
+| BUG | 影响 spec | 编译/运行/生成时 | 阻塞示例可用性 |
+| --- | ---       | ---              | ---            |
+| B1  | OpenAI    | 编译时           | ~~是~~ 已修复  |
+| B2  | OpenAI / 任何带对象 query 参数的 spec | 编译时 | ~~是~~ 已修复 |
+| B3  | GitHub / 任何 OAS 3.1 spec | 生成时 | 是 |
+| B4  | OpenAI 等 SSE/JSON 双通路 spec | 语义 | 否（功能缺失） |
+| B5  | OpenAI（数值上溢、布尔 exclusive、min_items 拼写）| 解析时 | 否（已就地修补） |
+
+建议次序：~~B1~~ → ~~B2~~ → B3（最简单、阻塞 GitHub 整条线）→
+B4（设计向）→ B5（可一直保留 build.rs 预处理）。
+
 ## 实现功能缺失
 
 - prefixItems

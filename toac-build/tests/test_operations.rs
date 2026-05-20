@@ -237,9 +237,10 @@ fn colliding_param_names_get_location_suffix() {
         "second id should be suffixed:\n{rendered}"
     );
     // The wire name is applied inside MakeRequest rather than via a
-    // serde rename — the query rendering pushes the literal "id" key.
+    // serde rename — the query rendering passes the literal "id" key
+    // to the runtime parameter encoder.
     assert!(
-        rendered.contains("__path.push_str(\"id\")"),
+        rendered.contains("encode_serialized") && rendered.contains("\"id\""),
         "wire name not carried into query encoding:\n{rendered}"
     );
 }

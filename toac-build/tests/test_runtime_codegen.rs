@@ -66,9 +66,11 @@ fn make_request_emitted_for_get_with_path_and_query() {
         compact.contains("Output = ::std::result::Result<::toac::Request, Self::Error>"),
         "make_request future output not Result<::toac::Request, Self::Error>:\n{rendered}"
     );
+    // Op declares a query parameter (`limit`), so the Error widens
+    // to `EncodeRequestError` to carry encoder failures.
     assert!(
-        compact.contains("type Error = ::std::convert::Infallible"),
-        "no-body operation should have Infallible Error:\n{rendered}"
+        compact.contains("type Error = ::toac::EncodeRequestError"),
+        "operation with query params should use EncodeRequestError:\n{rendered}"
     );
     assert!(
         compact.contains("fn make_request(self)"),
@@ -392,6 +394,51 @@ fn operation_impl_emitted_for_each_operation() {
     assert!(
         !compact.contains("type RequestBody"),
         "stale RequestBody associated type still emitted:\n{rendered}"
+    );
+}
+
+#[test]
+fn object_query_param_uses_runtime_encoder() {
+    // Regression for B2: an object-typed query parameter (here a
+    // free-form map) must not stringify through `ToString`. The
+    // generator should hand the value to the runtime encoder
+    // alongside the spec-supplied `(style, explode)` pair.
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        paths:
+          /search:
+            get:
+              operationId: search
+              parameters:
+                - name: filter
+                  in: query
+                  style: deepObject
+                  explode: true
+                  schema:
+                    type: object
+                    additionalProperties: { type: string }
+              responses:
+                "200":
+                  description: ok
+    "##});
+
+    let compact = compact(&rendered);
+    assert!(
+        compact.contains("encode_serialized"),
+        "object query param should route through encode_serialized:\n{rendered}"
+    );
+    assert!(
+        compact.contains("ParameterStyle::DeepObject"),
+        "deepObject style should be preserved on the wire:\n{rendered}"
+    );
+    assert!(
+        !compact.contains("ToString::to_string(&__value)"),
+        "blanket ToString path must not be used for object query params:\n{rendered}"
+    );
+    assert!(
+        compact.contains("type Error = ::toac::EncodeRequestError"),
+        "op should widen Error to EncodeRequestError:\n{rendered}"
     );
 }
 

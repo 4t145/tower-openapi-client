@@ -521,5 +521,193 @@ fn join_pct_pairs<'a, I: IntoIterator<Item = (&'a str, &'a str)>>(
     }
 }
 
+/// Failure raised by [`encode_serialized`].
+///
+/// Splits the two distinct failure paths so callers can act on them
+/// without string-matching: shape conversion (the value normalises to
+/// JSON but doesn't fit the OAS array-of-primitives / object-of-primitives
+/// constraint), encoding (the encoder rejects the value for the picked
+/// `(style, location)` combination), and `Serialize::serialize` itself.
+#[derive(Debug, thiserror::Error)]
+pub enum SerializeEncodeError {
+    /// `Serialize::serialize` returned an error before normalisation.
+    #[error("serialization error: {0}")]
+    Serde(#[from] serde_json::Error),
+
+    /// The serialised JSON shape is incompatible with OAS parameter
+    /// rules (e.g. an array element that's itself an object, or a top-
+    /// level value that's neither scalar / array / object).
+    #[error("value shape is not encodable as a parameter: {reason}")]
+    UnsupportedShape {
+        /// Brief description of the shape problem.
+        reason: &'static str,
+    },
+
+    /// The encoder rejected the value (style/location/explode mismatch).
+    #[error(transparent)]
+    Encode(#[from] EncodeError),
+}
+
+/// Serialises `value` and appends it to `dst` per OAS `(style, explode)`
+/// rules. Convenience wrapper around [`encode_parameter`] that lets
+/// generated code stay agnostic about whether a parameter is a primitive,
+/// an array, or an object — the runtime inspects the JSON form and
+/// picks the right [`ParameterValue`] variant.
+///
+/// Cost: one `serde_json::Value` allocation per parameter, plus
+/// per-element string conversion. Both stay constant per call and away
+/// from the hot path on requests without query parameters (the generator
+/// only emits this call when the operation declares one).
+///
+/// # Errors
+///
+/// Returns [`SerializeEncodeError::Serde`] if `Serialize::serialize`
+/// fails, [`SerializeEncodeError::UnsupportedShape`] when the JSON form
+/// can't be projected into a [`ParameterValue`] (e.g. nested arrays or
+/// non-string property keys at the top level), and
+/// [`SerializeEncodeError::Encode`] for the encoder's own validation
+/// failures.
+pub fn encode_serialized<T>(
+    dst: &mut String,
+    name: &str,
+    value: &T,
+    style: ParameterStyle,
+    explode: bool,
+    location: ParameterIn,
+    first: &mut bool,
+) -> Result<(), SerializeEncodeError>
+where
+    T: serde::Serialize + ?Sized,
+{
+    let json = serde_json::to_value(value)?;
+    encode_serialized_value(dst, name, &json, style, explode, location, first)
+}
+
+/// Same as [`encode_serialized`] but starts from an already-built
+/// [`serde_json::Value`]. Useful when generated code has projected the
+/// field through some other adapter (`HashMap`, `BTreeMap`, …) before
+/// reaching the encoder.
+///
+/// # Errors
+///
+/// Same conditions as [`encode_serialized`], minus the `Serde` variant
+/// (the value is already built).
+pub fn encode_serialized_value(
+    dst: &mut String,
+    name: &str,
+    json: &serde_json::Value,
+    style: ParameterStyle,
+    explode: bool,
+    location: ParameterIn,
+    first: &mut bool,
+) -> Result<(), SerializeEncodeError> {
+    use serde_json::Value;
+
+    // OAS treats `null` parameter values the same as "not present" —
+    // the field renders to nothing and `first` stays untouched. This
+    // matches what generated code already does for `Option::None`.
+    if json.is_null() {
+        return Ok(());
+    }
+
+    match json {
+        Value::Null => Ok(()),
+        Value::Bool(_) | Value::Number(_) | Value::String(_) => {
+            let scalar = scalar_to_string(json);
+            encode_parameter(
+                dst,
+                name,
+                ParameterValue::Scalar(&scalar),
+                style,
+                explode,
+                location,
+                first,
+            )?;
+            Ok(())
+        }
+        Value::Array(items) => {
+            let mut owned: Vec<String> = Vec::with_capacity(items.len());
+            for item in items {
+                if !is_primitive(item) {
+                    return Err(SerializeEncodeError::UnsupportedShape {
+                        reason: "array element is not a primitive",
+                    });
+                }
+                if item.is_null() {
+                    // OAS doesn't define a wire form for "array element
+                    // is null"; skip rather than guess.
+                    continue;
+                }
+                owned.push(scalar_to_string(item));
+            }
+            let refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+            encode_parameter(
+                dst,
+                name,
+                ParameterValue::Array(&refs),
+                style,
+                explode,
+                location,
+                first,
+            )?;
+            Ok(())
+        }
+        Value::Object(map) => {
+            let mut owned: Vec<(String, String)> = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                if !is_primitive(v) {
+                    return Err(SerializeEncodeError::UnsupportedShape {
+                        reason: "object property value is not a primitive",
+                    });
+                }
+                if v.is_null() {
+                    continue;
+                }
+                owned.push((k.clone(), scalar_to_string(v)));
+            }
+            let refs: Vec<(&str, &str)> = owned
+                .iter()
+                .map(|(k, v)| (k.as_str(), v.as_str()))
+                .collect();
+            encode_parameter(
+                dst,
+                name,
+                ParameterValue::Object(&refs),
+                style,
+                explode,
+                location,
+                first,
+            )?;
+            Ok(())
+        }
+    }
+}
+
+fn is_primitive(v: &serde_json::Value) -> bool {
+    matches!(
+        v,
+        serde_json::Value::Null
+            | serde_json::Value::Bool(_)
+            | serde_json::Value::Number(_)
+            | serde_json::Value::String(_)
+    )
+}
+
+/// Renders a JSON primitive as the wire string. Strings are passed
+/// through verbatim (no extra JSON quoting); booleans / numbers go
+/// through their `Display` form. Caller guarantees the value is a
+/// primitive — `Null`, `Array`, and `Object` would be wrong here.
+fn scalar_to_string(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        serde_json::Value::Number(n) => n.to_string(),
+        // Should be unreachable per caller guarantee, but render through
+        // the canonical JSON form rather than panicking — matches the
+        // "do not let codegen issues turn into client crashes" stance.
+        _ => v.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod test;
