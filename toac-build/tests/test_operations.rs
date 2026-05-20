@@ -279,3 +279,45 @@ fn path_and_operation_parameter_merge_operation_wins() {
         "path-level schema should have been replaced:\n{rendered}"
     );
 }
+
+/// When an op's response variant payload references a component schema
+/// whose name collides with the op-private `Response` enum (e.g. OpenAI's
+/// `POST /responses` returning `#/components/schemas/Response`), the
+/// payload reference must be qualified to `crate::components::Response`.
+/// Without that, the bare `Response` ident inside the variant resolves
+/// to the enum itself and produces an infinite-size recursive type.
+#[test]
+fn op_response_payload_qualified_when_component_shares_name() {
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info: { title: t, version: "0" }
+        components:
+          schemas:
+            Response:
+              type: object
+              required: [id]
+              properties:
+                id: { type: string }
+        paths:
+          /responses:
+            post:
+              operationId: createResponse
+              responses:
+                "200":
+                  description: OK
+                  content:
+                    application/json:
+                      schema:
+                        $ref: "#/components/schemas/Response"
+    "##});
+
+    assert!(
+        rendered.contains("Status200(crate::components::Response)"),
+        "variant payload must be absolute-qualified to break the \
+         self-shadowing cycle:\n{rendered}"
+    );
+    assert!(
+        !rendered.contains("Status200(Response)"),
+        "bare `Response` would resolve to the enum itself:\n{rendered}"
+    );
+}

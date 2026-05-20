@@ -243,6 +243,7 @@ impl<'a> Generator<'a> {
             match ref_name(ref_path) {
                 Some(name) => {
                     let ty = self.ensure_named_schema(ref_path, name, field_schema)?;
+                    let ty = self.qualify_for_current_stage(ty);
                     return Ok((ty, InlineDocs::default()));
                 }
                 None => {
@@ -260,6 +261,29 @@ impl<'a> Generator<'a> {
 
         let ty = self.inline_object_type(parent_type, field_name, schema)?;
         Ok((ty, docs))
+    }
+
+    /// Promotes a bare component-typed `Foo` to `crate::components::Foo`
+    /// when we're emitting code outside the components module. Inside the
+    /// components stage itself, the bare form stays — both because that
+    /// matches the surrounding mod path and because the recursive-box
+    /// pass inspects bare idents.
+    ///
+    /// The qualification matters in operation modules where a generated
+    /// `pub enum Response` shadows a `components::Response`: a bare
+    /// `Status200(Response)` would resolve back to the enum and produce
+    /// an infinite-size recursive type.
+    fn qualify_for_current_stage(&self, ty: syn::Type) -> syn::Type {
+        if self.current_stage != crate::generator::Stage::Operations {
+            return ty;
+        }
+        let syn::Type::Path(path) = &ty else {
+            return ty;
+        };
+        let Some(ident) = path.path.get_ident().cloned() else {
+            return ty;
+        };
+        parse_quote!(crate::components::#ident)
     }
 
     fn inline_object_type(
@@ -446,6 +470,7 @@ impl<'a> Generator<'a> {
                 Some(name) => {
                     let name = name.to_owned();
                     let ty = self.ensure_named_schema(ref_path, &name, member)?;
+                    let ty = self.qualify_for_current_stage(ty);
                     (ty, Some(name))
                 }
                 None => (json_any(), None),
