@@ -8,6 +8,10 @@ resolver = "3"
 #                     regression in emitted code surfaces as a build error
 # - `examples/*`    : usage walkthrough on a real-world spec; opt-in
 members = ["toac", "toac-build", "compile-check", "examples/*"]
+# Submodule directories under `examples/` host upstream OpenAPI specs (no
+# `Cargo.toml`); cargo would otherwise try to treat them as workspace
+# members because of the glob above.
+exclude = ["examples/openai-openapi", "examples/github-openapi"]
 # Keep day-to-day `cargo test` / `cargo build` on the library + its
 # compile guard; the example is a `cargo run -p petstore-example` affair.
 default-members = ["toac", "toac-build", "compile-check"]
