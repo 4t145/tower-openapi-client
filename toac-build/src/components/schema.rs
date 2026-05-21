@@ -560,11 +560,19 @@ fn non_null_type(schema: &ObjectSchema) -> Option<SchemaType> {
 }
 
 fn is_nullable(schema: &ObjectSchema) -> bool {
-    schema.is_nullable().unwrap_or(false)
+    schema.is_nullable().unwrap_or(false) || enum_contains_null(schema)
 }
 
 fn is_string_schema(schema: &ObjectSchema) -> bool {
     matches!(non_null_type(schema), Some(SchemaType::String))
+}
+
+/// Detects an OpenAPI 3.1 nullable enum spelled as `enum: [..., null]`
+/// without `"null"` in the `type` set. Treated as nullable so the
+/// containing field is wrapped in `Option<_>` while the enum itself
+/// only carries its non-null variants.
+fn enum_contains_null(schema: &ObjectSchema) -> bool {
+    schema.enum_values.iter().any(serde_json::Value::is_null)
 }
 
 fn primitive_type(ty: &SchemaType) -> Option<syn::Type> {
@@ -648,6 +656,13 @@ fn build_string_enum_items(
     let mut display_arms: Vec<proc_macro2::TokenStream> =
         Vec::with_capacity(schema.enum_values.len());
     for value in &schema.enum_values {
+        // OpenAPI 3.1 spells nullable enums as `enum: [..., null]`. The
+        // null is consumed by `enum_contains_null` to mark the field
+        // `Option<_>`; the enum itself only carries the non-null
+        // variants, so skip it here.
+        if value.is_null() {
+            continue;
+        }
         let Some(raw) = value.as_str() else {
             return Err(Error::Unsupported(format!(
                 "non-string enum variant in string schema: {value}"

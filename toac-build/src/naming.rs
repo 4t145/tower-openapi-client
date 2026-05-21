@@ -8,8 +8,9 @@ use proc_macro2::Span;
 
 /// Rust keywords the language forbids from appearing even as raw idents
 /// (see the Rust Reference, "Raw identifiers"). These get a trailing
-/// underscore instead.
-const RAW_IDENT_FORBIDDEN: &[&str] = &["crate", "self", "Self", "super"];
+/// underscore instead. `_` is the wildcard pattern, not an ident, so it
+/// is in the same bucket — `r#_` is rejected by the parser.
+const RAW_IDENT_FORBIDDEN: &[&str] = &["crate", "self", "Self", "super", "_"];
 
 /// Fallback suffix appended to otherwise-unspellable idents.
 const IDENT_SUFFIX_FALLBACK: &str = "_";
