@@ -90,6 +90,12 @@ impl<'a> Generator<'a> {
         );
         self.store_unnamed(meta_item);
 
+        // Build response variants up front: their declared MIMEs feed
+        // the auto-emitted `Accept` header, and the same set is used to
+        // shape the response enum and `ParseResponse` impl below.
+        let response_variants = self.build_response_variants(&response_ident, operation)?;
+        let accept_header = build_accept_header_value(&response_variants);
+
         let request_impl = build_make_request_impl(
             &request_ident,
             method,
@@ -97,10 +103,10 @@ impl<'a> Generator<'a> {
             &param_slots,
             body_slot.as_ref(),
             security_tokens.as_ref(),
+            accept_header.as_deref(),
         );
         self.store_unnamed(request_impl);
 
-        let response_variants = self.build_response_variants(&response_ident, operation)?;
         let response_item = build_response_enum(&response_ident, &response_variants);
         self.store_named(
             format!("__op/{key_prefix}/Response"),
@@ -358,6 +364,13 @@ impl<'a> Generator<'a> {
     }
 
     /// Resolves the response payload types for every declared status code.
+    ///
+    /// Each `(status, content-type)` pair becomes its own
+    /// [`ResponseVariant`]. Pairs that classify to the same
+    /// [`CodecKind`] under one status are deduplicated (the first MIME
+    /// wins) so we don't emit, say, two `application/*+json` variants
+    /// that would decode identically. Statuses without `content` produce
+    /// a single unit variant.
     fn build_response_variants(
         &mut self,
         enum_ident: &syn::Ident,
@@ -371,56 +384,72 @@ impl<'a> Generator<'a> {
             let Ok(response) = resp_or_ref.resolve(self.spec) else {
                 continue;
             };
-            let variant_ident = response_variant_ident(status);
-            let (inner_type, codec) = match preferred_media_type(&response.content) {
-                Some((mime, media)) => {
-                    let codec = CodecKind::classify(mime).unwrap_or(CodecKind::Json);
-                    let ty = match codec {
-                        CodecKind::Json | CodecKind::Xml => match media.schema.as_ref() {
-                            Some(schema_or_ref) => Some(self.field_type_from_schema(
+            let base_ident = response_variant_ident(status);
+            let content_branches = collect_content_branches(&response.content);
+            if content_branches.is_empty() {
+                out.push(ResponseVariant {
+                    status: status.clone(),
+                    variant_ident: base_ident,
+                    inner_type: None,
+                    codec: None,
+                    content_type: None,
+                    description: response.description.clone(),
+                });
+                continue;
+            }
+            let multiple = content_branches.len() > 1;
+            for (mime, codec) in content_branches {
+                let media = response
+                    .content
+                    .get(&mime)
+                    .expect("mime returned by collect_content_branches must exist");
+                let variant_ident = if multiple {
+                    make_ident(&format!("{base_ident}{}", codec_variant_suffix(codec)))
+                } else {
+                    base_ident.clone()
+                };
+                let ty = match codec {
+                    CodecKind::Json | CodecKind::Xml => match media.schema.as_ref() {
+                        Some(schema_or_ref) => Some(self.field_type_from_schema(
+                            enum_ident,
+                            &format!("{variant_ident}Body"),
+                            schema_or_ref,
+                        )?),
+                        None => None,
+                    },
+                    CodecKind::Octet => Some(parse_quote!(::bytes::Bytes)),
+                    CodecKind::Text => Some(parse_quote!(::std::string::String)),
+                    // Form / multipart responses don't exist in real
+                    // APIs (see codec doc); treat them as opaque.
+                    CodecKind::Form | CodecKind::Multipart => None,
+                    CodecKind::Ndjson => match media.schema.as_ref() {
+                        Some(schema_or_ref) => {
+                            let inner = self.field_type_from_schema(
                                 enum_ident,
                                 &format!("{variant_ident}Body"),
                                 schema_or_ref,
-                            )?),
-                            None => None,
-                        },
-                        CodecKind::Octet => Some(parse_quote!(::bytes::Bytes)),
-                        CodecKind::Text => Some(parse_quote!(::std::string::String)),
-                        // Form / multipart responses don't exist in real
-                        // APIs (see codec doc); treat them as opaque.
-                        CodecKind::Form | CodecKind::Multipart => None,
-                        CodecKind::Ndjson => match media.schema.as_ref() {
-                            Some(schema_or_ref) => {
-                                let inner = self.field_type_from_schema(
-                                    enum_ident,
-                                    &format!("{variant_ident}Body"),
-                                    schema_or_ref,
-                                )?;
-                                Some(parse_quote!(
-                                    ::toac::body::codec::ndjson::NdjsonStream<#inner>
-                                ))
-                            }
-                            // No schema → hand the user the raw line
-                            // payload as `serde_json::Value`.
-                            None => Some(parse_quote!(
-                                ::toac::body::codec::ndjson::NdjsonStream<::serde_json::Value>
-                            )),
-                        },
-                        CodecKind::Sse => {
-                            Some(parse_quote!(::toac::body::codec::sse::SseEventStream))
+                            )?;
+                            Some(parse_quote!(
+                                ::toac::body::codec::ndjson::NdjsonStream<#inner>
+                            ))
                         }
-                    };
-                    (ty, Some(codec))
-                }
-                None => (None, None),
-            };
-            out.push(ResponseVariant {
-                status: status.clone(),
-                variant_ident,
-                inner_type,
-                codec,
-                description: response.description.clone(),
-            });
+                        // No schema → hand the user the raw line
+                        // payload as `serde_json::Value`.
+                        None => Some(parse_quote!(
+                            ::toac::body::codec::ndjson::NdjsonStream<::serde_json::Value>
+                        )),
+                    },
+                    CodecKind::Sse => Some(parse_quote!(::toac::body::codec::sse::SseEventStream)),
+                };
+                out.push(ResponseVariant {
+                    status: status.clone(),
+                    variant_ident,
+                    inner_type: ty,
+                    codec: Some(codec),
+                    content_type: Some(mime),
+                    description: response.description.clone(),
+                });
+            }
         }
         Ok(out)
     }
@@ -503,17 +532,93 @@ impl BodySlot {
 }
 
 /// Fully-resolved description of one response variant.
+///
+/// One variant maps to a `(status, codec)` pair: a status that exposes
+/// several codec branches in its `content` map (e.g. `application/json`
+/// and `text/event-stream` under `200`) yields multiple variants. Each
+/// variant remembers the wire MIME so [`build_parse_response_impl`] can
+/// dispatch on the response `Content-Type`. Unit (no-content) variants
+/// keep `inner_type` and `codec` as `None` and don't participate in
+/// MIME-based dispatch.
 struct ResponseVariant {
     /// Raw OpenAPI status key (`"200"`, `"default"`, `"2XX"`, ...).
     status: String,
-    /// Rust variant ident (`Status200`, `Default`, `Status2XX`, ...).
+    /// Rust variant ident (`Status200`, `Status200Sse`, `Default`, ...).
     variant_ident: syn::Ident,
     /// Payload type, `None` for unit variants.
     inner_type: Option<syn::Type>,
     /// Codec to drive decoding, present iff `inner_type` is.
     codec: Option<CodecKind>,
+    /// Wire MIME this variant came from. Empty for unit variants.
+    /// Used by `parse_response` for `Content-Type`-based dispatch when
+    /// the same status has more than one codec branch, and by the
+    /// auto-emitted `Accept` header.
+    content_type: Option<String>,
     /// Free-form description lifted from the spec.
     description: Option<String>,
+}
+
+/// Walks a response `content` map and returns one `(mime, codec)` pair
+/// per distinct codec, in a deterministic order.
+///
+/// JSON-shaped MIMEs (`application/json` and any vendor `+json`) collapse
+/// to a single `Json` branch with the first matching MIME — generating
+/// two variants that decode identically would only fragment dispatch.
+/// `application/json` is preferred when present so the variant ident
+/// stays stable across spec edits that add new vendor MIMEs.
+///
+/// MIMEs whose codec is unknown are skipped — they have no decoder to
+/// drive and would only produce an unconstructable variant.
+fn collect_content_branches(content: &BTreeMap<String, MediaType>) -> Vec<(String, CodecKind)> {
+    let mut by_codec: std::collections::BTreeMap<u8, (String, CodecKind)> =
+        std::collections::BTreeMap::new();
+    for mime in content.keys() {
+        let Some(codec) = CodecKind::classify(mime) else {
+            continue;
+        };
+        let key = codec_sort_key(codec);
+        let prefer = mime.eq_ignore_ascii_case("application/json");
+        match by_codec.get(&key) {
+            Some((existing, _)) if existing.eq_ignore_ascii_case("application/json") => {}
+            _ => {
+                if prefer || !by_codec.contains_key(&key) {
+                    by_codec.insert(key, (mime.clone(), codec));
+                }
+            }
+        }
+    }
+    by_codec.into_values().collect()
+}
+
+/// Stable sort key used by [`collect_content_branches`]. The numeric
+/// space is a private detail; only ordering matters.
+fn codec_sort_key(codec: CodecKind) -> u8 {
+    match codec {
+        CodecKind::Json => 0,
+        CodecKind::Xml => 1,
+        CodecKind::Form => 2,
+        CodecKind::Multipart => 3,
+        CodecKind::Octet => 4,
+        CodecKind::Text => 5,
+        CodecKind::Ndjson => 6,
+        CodecKind::Sse => 7,
+    }
+}
+
+/// PascalCase suffix appended to a status variant ident when one status
+/// resolves to several codec variants, e.g. `Status200` + `Json` →
+/// `Status200Json`.
+fn codec_variant_suffix(codec: CodecKind) -> &'static str {
+    match codec {
+        CodecKind::Json => "Json",
+        CodecKind::Xml => "Xml",
+        CodecKind::Form => "Form",
+        CodecKind::Multipart => "Multipart",
+        CodecKind::Octet => "Octet",
+        CodecKind::Text => "Text",
+        CodecKind::Ndjson => "Ndjson",
+        CodecKind::Sse => "Sse",
+    }
 }
 
 /// Inserts or replaces a parameter in the merged list using the spec's
@@ -792,6 +897,11 @@ fn build_request_struct(
 }
 
 /// Assembles the response enum from resolved variants.
+///
+/// `Debug` / `Clone` / `PartialEq` derives are dropped when any variant
+/// carries a streaming payload (`SseEventStream`, `NdjsonStream<_>`):
+/// stream types don't implement those traits, and the `Cargo.toml`
+/// feature gating may also leave the underlying types unavailable.
 fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn::Item {
     if variants.is_empty() {
         return parse_quote! {
@@ -803,6 +913,15 @@ fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn:
             }
         };
     }
+
+    let has_streaming = variants
+        .iter()
+        .any(|v| matches!(v.codec, Some(CodecKind::Sse | CodecKind::Ndjson)));
+    let derive_attr = if has_streaming {
+        quote! {}
+    } else {
+        quote! { #[derive(Debug, Clone, PartialEq)] }
+    };
 
     let variant_tokens: Vec<proc_macro2::TokenStream> = variants
         .iter()
@@ -823,7 +942,7 @@ fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn:
         .collect();
 
     parse_quote! {
-        #[derive(Debug, Clone, PartialEq)]
+        #derive_attr
         pub enum #ident {
             #(#variant_tokens,)*
         }
@@ -872,6 +991,20 @@ fn build_metadata_impl(
             /// slice encodes AND requirements within one alternative.
             /// Empty outer slice means "public, no auth required".
             pub const SECURITY: &'static [&'static [&'static str]] = #security_literal;
+
+            /// Wraps this request with an `Accept` header override.
+            ///
+            /// The generated [`::toac::MakeRequest`] impl auto-emits an
+            /// `Accept` header listing every response media type
+            /// declared in the spec. Use this method to steer content
+            /// negotiation to one specific type (for example, asking
+            /// for `text/event-stream` to land on a streaming branch).
+            pub fn with_accept(
+                self,
+                accept: ::http::HeaderValue,
+            ) -> ::toac::WithAccept<Self> {
+                ::toac::WithAccept::new(self, accept)
+            }
         }
     }
 }
@@ -893,12 +1026,14 @@ fn build_make_request_impl(
     params: &[ParamSlot],
     body: Option<&BodySlot>,
     security: Option<&proc_macro2::TokenStream>,
+    accept_header: Option<&str>,
 ) -> syn::Item {
     let method_tokens = method_tokens(method);
 
     let path_rendering = render_path_statements(path, params);
     let query_rendering = render_query_statements(params);
     let header_rendering = render_header_statements(params);
+    let accept_rendering = render_accept_header(accept_header, params);
     let body_apply = render_body_apply(body, params);
     let security_rendering = render_security_extension(security);
     let make_request = crate::constants::runtime_path("MakeRequest");
@@ -923,6 +1058,7 @@ fn build_make_request_impl(
                     let mut __builder = ::http::Request::builder()
                         .method(#method_tokens)
                         .uri(__path);
+                    #accept_rendering
                     #header_rendering
 
                     let mut __request = __builder
@@ -933,6 +1069,59 @@ fn build_make_request_impl(
                 }
             }
         }
+    }
+}
+
+/// Builds the `Accept` header value the generated `MakeRequest` impl
+/// auto-emits.
+///
+/// Combines every distinct response media type declared across the op's
+/// statuses, in the codec-priority order [`codec_sort_key`] uses. Returns
+/// `None` when the spec exposes no decodeable response (for example,
+/// only unit responses or only codecs we don't recognise) — in that case
+/// codegen omits the `Accept` header entirely so a request looks
+/// identical to what callers would write by hand.
+fn build_accept_header_value(variants: &[ResponseVariant]) -> Option<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut sorted: Vec<(u8, String)> = Vec::new();
+    for variant in variants {
+        let Some(mime) = variant.content_type.as_deref() else {
+            continue;
+        };
+        let lower = mime.to_ascii_lowercase();
+        if !seen.insert(lower.clone()) {
+            continue;
+        }
+        let codec = variant.codec.unwrap_or(CodecKind::Json);
+        sorted.push((codec_sort_key(codec), mime.to_string()));
+    }
+    if sorted.is_empty() {
+        return None;
+    }
+    sorted.sort_by_key(|entry| entry.0);
+    let joined = sorted
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(joined)
+}
+
+/// Tokens that set the auto-emitted `Accept` header on `__builder`.
+/// Skipped when the spec declares an `Accept` parameter (per
+/// [`IGNORED_HEADER_NAMES`] semantics — the parameter is *removed* from
+/// the request struct, but its presence is a strong signal that the
+/// caller wants control of `Accept` themselves; we don't second-guess
+/// them by overriding).
+fn render_accept_header(accept: Option<&str>, _params: &[ParamSlot]) -> proc_macro2::TokenStream {
+    let Some(value) = accept else {
+        return proc_macro2::TokenStream::new();
+    };
+    quote! {
+        __builder = __builder.header(
+            ::http::header::ACCEPT,
+            ::http::HeaderValue::from_static(#value),
+        );
     }
 }
 
@@ -1018,13 +1207,17 @@ fn build_parse_response_impl(
     let decode_error = crate::constants::runtime_path("DecodeError");
     let box_error = crate::constants::runtime_path("BoxError");
 
-    let arms: Vec<proc_macro2::TokenStream> =
-        variants.iter().filter_map(response_match_arm).collect();
-    let default_arm = variants
+    let groups = group_variants_by_status(variants);
+    let arms: Vec<proc_macro2::TokenStream> = groups
         .iter()
-        .find(|v| v.status.eq_ignore_ascii_case("default"));
-    let fallback = match default_arm {
-        Some(variant) => default_fallback_tokens(response_ident, variant),
+        .filter_map(|(status, group)| status_dispatch_arm(status, group))
+        .collect();
+    let default_group = groups
+        .iter()
+        .find(|(status, _)| status.eq_ignore_ascii_case("default"))
+        .map(|(_, group)| group.clone());
+    let fallback = match default_group {
+        Some(group) => default_fallback_tokens(response_ident, &group),
         None => quote! {
             ::std::mem::drop(__body);
             return ::std::result::Result::Err(
@@ -1041,6 +1234,24 @@ fn build_parse_response_impl(
                 _ => {}
             }
         }
+    };
+
+    // Only emit the `__content_type` binding when at least one group
+    // actually dispatches on it. Otherwise the variable would be unused
+    // and trip `unused_variables`.
+    let needs_content_type = groups.iter().any(|(_, g)| g.len() > 1);
+    let content_type_binding = if needs_content_type {
+        quote! {
+            let __content_type = __parts
+                .headers
+                .get(::http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    s.split(';').next().unwrap_or(s).trim().to_ascii_lowercase()
+                });
+        }
+    } else {
+        quote! {}
     };
 
     // When the enum is the `Empty`-only placeholder (no responses
@@ -1073,11 +1284,113 @@ fn build_parse_response_impl(
                 async move {
                     let (__parts, __body) = response.into_parts();
                     let __status = __parts.status;
+                    #content_type_binding
                     #empty_fallback
                     #arm_tokens
                     #fallback
                 }
             }
+        }
+    }
+}
+
+/// Groups variants by their status key, preserving variant order within
+/// each group. Used by `parse_response` to choose between codec branches
+/// of the same status via `Content-Type` dispatch.
+fn group_variants_by_status(variants: &[ResponseVariant]) -> Vec<(String, Vec<&ResponseVariant>)> {
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: std::collections::BTreeMap<String, Vec<&ResponseVariant>> =
+        std::collections::BTreeMap::new();
+    for variant in variants {
+        if !buckets.contains_key(&variant.status) {
+            order.push(variant.status.clone());
+        }
+        buckets
+            .entry(variant.status.clone())
+            .or_default()
+            .push(variant);
+    }
+    order
+        .into_iter()
+        .map(|status| {
+            let group = buckets.remove(&status).expect("status was inserted above");
+            (status, group)
+        })
+        .collect()
+}
+
+/// Builds the match arm body for one status group. Returns `None` for
+/// statuses that can't be expressed as a `u16` (e.g. `2XX`, `default`).
+fn status_dispatch_arm(
+    status: &str,
+    group: &[&ResponseVariant],
+) -> Option<proc_macro2::TokenStream> {
+    let status_num: u16 = status.parse().ok()?;
+    let body = render_status_group_body(group);
+    Some(quote! {
+        #status_num => { #body }
+    })
+}
+
+/// Tokens that decode a status group's body. When the group has a single
+/// variant we just decode straight into it; multiple codec branches
+/// dispatch on the lowercased `Content-Type` (without parameters).
+fn render_status_group_body(group: &[&ResponseVariant]) -> proc_macro2::TokenStream {
+    if group.len() == 1 {
+        let variant = group[0];
+        let id = &variant.variant_ident;
+        return match &variant.inner_type {
+            Some(_) => decode_variant_body(variant, quote! { Self::#id }),
+            None => quote! {
+                ::std::mem::drop(__body);
+                return ::std::result::Result::Ok(Self::#id);
+            },
+        };
+    }
+
+    // Multi-codec status: pick the branch whose declared MIME matches the
+    // response `Content-Type`. The first branch is also used as the
+    // fallback when the header is missing or unrecognised — that way we
+    // still produce a typed response on lenient servers, instead of
+    // failing every multi-codec status.
+    let mut arms: Vec<proc_macro2::TokenStream> = Vec::with_capacity(group.len());
+    for variant in group {
+        let Some(mime) = variant.content_type.as_deref() else {
+            continue;
+        };
+        let mime_lc = mime.to_ascii_lowercase();
+        let id = &variant.variant_ident;
+        let decode = match &variant.inner_type {
+            Some(_) => decode_variant_body(variant, quote! { Self::#id }),
+            None => quote! {
+                ::std::mem::drop(__body);
+                return ::std::result::Result::Ok(Self::#id);
+            },
+        };
+        arms.push(quote! {
+            ::std::option::Option::Some(__ct) if __ct == #mime_lc => {
+                #decode
+            }
+        });
+    }
+
+    // Fallback variant when Content-Type is missing or matched none of
+    // the declared MIMEs — pick the first branch (typically the JSON one
+    // because of `codec_sort_key`'s ordering).
+    let fallback_variant = group[0];
+    let fb_id = &fallback_variant.variant_ident;
+    let fallback = match &fallback_variant.inner_type {
+        Some(_) => decode_variant_body(fallback_variant, quote! { Self::#fb_id }),
+        None => quote! {
+            ::std::mem::drop(__body);
+            return ::std::result::Result::Ok(Self::#fb_id);
+        },
+    };
+
+    quote! {
+        match __content_type.as_deref() {
+            #(#arms)*
+            _ => { #fallback }
         }
     }
 }
@@ -1406,41 +1719,62 @@ fn render_encoder_with_default_or_override(
     }
 }
 
-/// Builds the match arm that dispatches one status code into its response
-/// enum variant. Returns `None` for statuses that can't be expressed as a
-/// single `u16` (e.g. `2XX`, `default`) so callers can handle them
-/// separately.
-///
-/// Arms that carry a payload move `__body` into the codec decoder and
-/// `return` from the async block, so `__body` stays available for the
-/// fallback path when no arm matches.
-fn response_match_arm(variant: &ResponseVariant) -> Option<proc_macro2::TokenStream> {
-    let status: u16 = variant.status.parse().ok()?;
-    let variant_ident = &variant.variant_ident;
-    let body_tokens = match &variant.inner_type {
-        Some(_) => decode_variant_body(variant, quote! { Self::#variant_ident }),
-        None => quote! {
-            ::std::mem::drop(__body);
-            return ::std::result::Result::Ok(Self::#variant_ident);
-        },
-    };
-    Some(quote! {
-        #status => { #body_tokens }
-    })
-}
-
-/// Tokens that consume the body into the `default` variant when present.
+/// Tokens that consume the body into the `default` variant when
+/// present. Mirrors [`render_status_group_body`] but constructs the
+/// variants as `#response_ident::#variant_ident` (this helper is invoked
+/// from the fallback arm where `Self` is not in scope).
 fn default_fallback_tokens(
     response_ident: &syn::Ident,
-    variant: &ResponseVariant,
+    group: &[&ResponseVariant],
 ) -> proc_macro2::TokenStream {
-    let variant_ident = &variant.variant_ident;
-    match &variant.inner_type {
-        Some(_) => decode_variant_body(variant, quote! { #response_ident::#variant_ident }),
+    if group.len() == 1 {
+        let variant = group[0];
+        let id = &variant.variant_ident;
+        return match &variant.inner_type {
+            Some(_) => decode_variant_body(variant, quote! { #response_ident::#id }),
+            None => quote! {
+                ::std::mem::drop(__body);
+                return ::std::result::Result::Ok(#response_ident::#id);
+            },
+        };
+    }
+
+    let mut arms: Vec<proc_macro2::TokenStream> = Vec::with_capacity(group.len());
+    for variant in group {
+        let Some(mime) = variant.content_type.as_deref() else {
+            continue;
+        };
+        let mime_lc = mime.to_ascii_lowercase();
+        let id = &variant.variant_ident;
+        let decode = match &variant.inner_type {
+            Some(_) => decode_variant_body(variant, quote! { #response_ident::#id }),
+            None => quote! {
+                ::std::mem::drop(__body);
+                return ::std::result::Result::Ok(#response_ident::#id);
+            },
+        };
+        arms.push(quote! {
+            ::std::option::Option::Some(__ct) if __ct == #mime_lc => {
+                #decode
+            }
+        });
+    }
+
+    let fallback_variant = group[0];
+    let fb_id = &fallback_variant.variant_ident;
+    let fallback = match &fallback_variant.inner_type {
+        Some(_) => decode_variant_body(fallback_variant, quote! { #response_ident::#fb_id }),
         None => quote! {
             ::std::mem::drop(__body);
-            return ::std::result::Result::Ok(#response_ident::#variant_ident);
+            return ::std::result::Result::Ok(#response_ident::#fb_id);
         },
+    };
+
+    quote! {
+        match __content_type.as_deref() {
+            #(#arms)*
+            _ => { #fallback }
+        }
     }
 }
 
@@ -1540,3 +1874,6 @@ fn response_variant_ident(status: &str) -> syn::Ident {
     let upper = status.to_ascii_uppercase();
     make_ident(&format!("Status{upper}"))
 }
+
+#[cfg(test)]
+mod test;

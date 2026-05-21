@@ -29,6 +29,7 @@ use std::{
     task::{Context, Poll},
 };
 
+mod accept;
 pub mod body;
 pub mod compat;
 mod error;
@@ -37,6 +38,7 @@ mod response;
 pub mod security;
 mod server;
 
+pub use accept::WithAccept;
 pub use error::{BoxError, EncodeRequestError};
 pub use request::Request;
 pub use response::Response;
