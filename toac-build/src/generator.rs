@@ -18,6 +18,13 @@ use syn::parse_quote;
 
 use crate::{Error, naming::type_ident};
 
+/// Default root path the generated code uses to reach its sibling
+/// modules (e.g. `<root>::components::Foo`). The default assumes the
+/// generated tokens are mounted at the consumer's crate root via
+/// `include!`; users who mount under a sub-module can override
+/// [`BuildOptions::root_path`].
+const DEFAULT_ROOT_PATH: &str = "crate";
+
 /// Prefix for every schema component ref path: `#/components/schemas/<Name>`.
 pub(crate) const SCHEMA_REF_PREFIX: &str = "#/components/schemas/";
 
@@ -56,7 +63,7 @@ pub enum Stage {
 /// produced code compiles without adding new dependencies — callers
 /// must add the corresponding crates themselves (`chrono`, `uuid`, or
 /// this crate's own `base64` feature) when turning a flag on.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone)]
 pub struct BuildOptions {
     /// Emit `::chrono::DateTime<::chrono::Utc>` for `format: date-time`,
     /// `::chrono::NaiveDate` for `format: date`, and
@@ -70,6 +77,44 @@ pub struct BuildOptions {
     /// consumer to enable the `base64` feature of the `toac` runtime
     /// crate.
     pub use_base64_string: bool,
+
+    /// Root path the generated code uses to refer to its own sibling
+    /// modules (e.g. `<root_path>::components::Foo` from inside an
+    /// operation module).
+    ///
+    /// Defaults to `crate`, which assumes the consumer pastes the
+    /// generated tokens at their crate root via `include!`. Override
+    /// when mounting under a sub-module — for instance, a build script
+    /// that writes the tokens into `src/api/mod.rs` should set this to
+    /// `crate::api`.
+    pub root_path: syn::Path,
+}
+
+impl Default for BuildOptions {
+    fn default() -> Self {
+        Self {
+            use_chrono: false,
+            use_uuid: false,
+            use_base64_string: false,
+            root_path: syn::parse_str(DEFAULT_ROOT_PATH).expect("DEFAULT_ROOT_PATH parses"),
+        }
+    }
+}
+
+impl ::std::fmt::Debug for BuildOptions {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        // `syn::Path` doesn't implement Debug, so render it via
+        // tokens to keep `BuildOptions` printable.
+        f.debug_struct("BuildOptions")
+            .field("use_chrono", &self.use_chrono)
+            .field("use_uuid", &self.use_uuid)
+            .field("use_base64_string", &self.use_base64_string)
+            .field(
+                "root_path",
+                &quote::ToTokens::to_token_stream(&self.root_path).to_string(),
+            )
+            .finish()
+    }
 }
 
 /// Whole-program state shared across every generation stage.

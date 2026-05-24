@@ -307,11 +307,14 @@ impl<'a> Generator<'a> {
         Ok((ty, docs))
     }
 
-    /// Promotes a bare component-typed `Foo` to `crate::components::Foo`
-    /// when we're emitting code outside the components module. Inside the
-    /// components stage itself, the bare form stays — both because that
-    /// matches the surrounding mod path and because the recursive-box
-    /// pass inspects bare idents.
+    /// Promotes a bare component-typed `Foo` to
+    /// `<root>::components::Foo` when we're emitting code outside the
+    /// components module. The `<root>` prefix comes from
+    /// [`BuildOptions::root_path`] so consumers can mount the generated
+    /// tokens anywhere in their module tree. Inside the components
+    /// stage itself, the bare form stays — both because that matches
+    /// the surrounding mod path and because the recursive-box pass
+    /// inspects bare idents.
     ///
     /// The qualification matters in operation modules where a generated
     /// `pub enum Response` shadows a `components::Response`: a bare
@@ -327,7 +330,8 @@ impl<'a> Generator<'a> {
         let Some(ident) = path.path.get_ident().cloned() else {
             return ty;
         };
-        parse_quote!(crate::components::#ident)
+        let root = &self.options.root_path;
+        parse_quote!(#root::components::#ident)
     }
 
     fn inline_object_type(

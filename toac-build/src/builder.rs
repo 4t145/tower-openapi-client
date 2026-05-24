@@ -85,6 +85,21 @@ impl Builder {
         self
     }
 
+    /// Sets the path the generated code uses to refer to its sibling
+    /// modules — see [`BuildOptions::root_path`].
+    ///
+    /// Accepts any value `syn::parse_str::<syn::Path>` accepts, so both
+    /// `crate::api` and `super::client` work.
+    ///
+    /// # Errors
+    ///
+    /// Returns the parse error verbatim when `path` isn't a valid
+    /// `syn::Path`.
+    pub fn root_path(mut self, path: &str) -> Result<Self, syn::Error> {
+        self.options.root_path = syn::parse_str(path)?;
+        Ok(self)
+    }
+
     /// Replaces the full [`BuildOptions`]. Chain this when you have a
     /// preconfigured value rather than setting individual flags.
     pub fn options(mut self, options: BuildOptions) -> Self {
