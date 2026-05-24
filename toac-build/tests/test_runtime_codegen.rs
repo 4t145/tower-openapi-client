@@ -263,9 +263,9 @@ fn parse_response_dispatches_on_status() {
         rendered.contains("404u16 =>") || rendered.contains("404 =>"),
         "404 arm missing:\n{rendered}"
     );
-    // default is the fallback variant
+    // default is the fallback variant on the body enum
     assert!(
-        rendered.contains("Response::Default"),
+        rendered.contains("ResponseBody::Default"),
         "default fallback missing:\n{rendered}"
     );
     // 200 with schema decodes via the codec
@@ -322,10 +322,10 @@ fn component_refs_from_operations_are_qualified() {
         rendered.contains("crate::components::Pet"),
         "component reference should use crate::components::...:\n{rendered}"
     );
-    // Local types like the op's own response enum must NOT be rewritten.
+    // Local types like the op's own response body enum must NOT be rewritten.
     assert!(
-        rendered.contains("pub enum Response"),
-        "response enum ident mangled:\n{rendered}"
+        rendered.contains("pub enum ResponseBody"),
+        "response body enum ident mangled:\n{rendered}"
     );
 }
 

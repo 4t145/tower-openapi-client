@@ -17,11 +17,11 @@ use tracing::{info, warn};
 // Local aliases keep the call sites below readable while delegating to
 // the path-module types the generator now emits.
 type GetPetByIdRequest = get_pet::Request;
-type GetPetByIdResponse = get_pet::Response;
+type GetPetByIdResponseBody = get_pet::ResponseBody;
 type AddPetRequest = add_pet::Request;
-type AddPetResponse = add_pet::Response;
+type AddPetResponseBody = add_pet::ResponseBody;
 type UpdatePetRequest = update_pet::Request;
-type UpdatePetResponse = update_pet::Response;
+type UpdatePetResponseBody = update_pet::ResponseBody;
 
 /// Base URL used by every call below.
 const PETSTORE_BASE_URL: &str = "https://petstore3.swagger.io/api/v3";
@@ -68,14 +68,16 @@ async fn demo_get_pet(client: PetstoreClient) {
         })
         .await
     {
-        Ok(GetPetByIdResponse::Status200(pet)) => {
-            info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet fetched");
-        }
-        Ok(GetPetByIdResponse::Status400) => info!("server reported 400 invalid id"),
-        Ok(GetPetByIdResponse::Status404) => info!("pet not found"),
-        Ok(GetPetByIdResponse::Default) => {
-            info!("server returned unspecified status (default variant)");
-        }
+        Ok(resp) => match resp.body {
+            GetPetByIdResponseBody::Status200(pet) => {
+                info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet fetched");
+            }
+            GetPetByIdResponseBody::Status400 => info!("server reported 400 invalid id"),
+            GetPetByIdResponseBody::Status404 => info!("pet not found"),
+            GetPetByIdResponseBody::Default => {
+                info!("server returned unspecified status (default variant)");
+            }
+        },
         Err(err) => report_call_error("getPetById", &err),
     }
 }
@@ -89,14 +91,16 @@ async fn demo_get_pet_missing(client: PetstoreClient) {
         })
         .await
     {
-        Ok(GetPetByIdResponse::Status200(pet)) => {
-            warn!(id = ?pet.id, "unexpected 200 for missing id");
-        }
-        Ok(GetPetByIdResponse::Status400) => info!("server reported 400 invalid id"),
-        Ok(GetPetByIdResponse::Status404) => info!("observed 404 as expected"),
-        Ok(GetPetByIdResponse::Default) => {
-            info!("server returned unspecified status (default variant)");
-        }
+        Ok(resp) => match resp.body {
+            GetPetByIdResponseBody::Status200(pet) => {
+                warn!(id = ?pet.id, "unexpected 200 for missing id");
+            }
+            GetPetByIdResponseBody::Status400 => info!("server reported 400 invalid id"),
+            GetPetByIdResponseBody::Status404 => info!("observed 404 as expected"),
+            GetPetByIdResponseBody::Default => {
+                info!("server returned unspecified status (default variant)");
+            }
+        },
         Err(err) => report_call_error("getPetById", &err),
     }
 }
@@ -123,13 +127,15 @@ async fn demo_add_pet(client: PetstoreClient) {
     };
 
     match client.oneshot(request).await {
-        Ok(AddPetResponse::Status200(pet)) => {
-            info!(id = ?pet.id, name = %pet.name, "pet created");
-        }
-        Ok(AddPetResponse::Status405) => info!("server reported 405 invalid input"),
-        Ok(AddPetResponse::Default) => {
-            info!("server returned unspecified status (default variant)");
-        }
+        Ok(resp) => match resp.body {
+            AddPetResponseBody::Status200(pet) => {
+                info!(id = ?pet.id, name = %pet.name, "pet created");
+            }
+            AddPetResponseBody::Status405 => info!("server reported 405 invalid input"),
+            AddPetResponseBody::Default => {
+                info!("server returned unspecified status (default variant)");
+            }
+        },
         Err(err) => report_call_error("addPet", &err),
     }
 }
@@ -152,15 +158,17 @@ async fn demo_update_pet(client: PetstoreClient) {
     };
 
     match client.oneshot(request).await {
-        Ok(UpdatePetResponse::Status200(pet)) => {
-            info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet updated");
-        }
-        Ok(UpdatePetResponse::Status400) => info!("server reported 400 invalid id"),
-        Ok(UpdatePetResponse::Status404) => info!("pet not found"),
-        Ok(UpdatePetResponse::Status405) => info!("server reported 405 validation exception"),
-        Ok(UpdatePetResponse::Default) => {
-            info!("server returned unspecified status (default variant)");
-        }
+        Ok(resp) => match resp.body {
+            UpdatePetResponseBody::Status200(pet) => {
+                info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet updated");
+            }
+            UpdatePetResponseBody::Status400 => info!("server reported 400 invalid id"),
+            UpdatePetResponseBody::Status404 => info!("pet not found"),
+            UpdatePetResponseBody::Status405 => info!("server reported 405 validation exception"),
+            UpdatePetResponseBody::Default => {
+                info!("server returned unspecified status (default variant)");
+            }
+        },
         Err(err) => report_call_error("updatePet", &err),
     }
 }

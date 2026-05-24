@@ -107,15 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn demo_list_models(client: &mut OpenAiClient) {
     info!("GET /models");
     match client.call(list_models::Request {}).await {
-        Ok(list_models::Response::Status200(list)) => {
-            info!(count = list.data.len(), "models returned");
-            for model in list.data.iter().take(5) {
-                info!(id = %model.id, owned_by = %model.owned_by, "model");
+        Ok(resp) => match resp.body {
+            list_models::ResponseBody::Status200(list) => {
+                info!(count = list.data.len(), "models returned");
+                for model in list.data.iter().take(5) {
+                    info!(id = %model.id, owned_by = %model.owned_by, "model");
+                }
+                if list.data.len() > 5 {
+                    info!(omitted = list.data.len() - 5, "… remaining models elided");
+                }
             }
-            if list.data.len() > 5 {
-                info!(omitted = list.data.len() - 5, "… remaining models elided");
-            }
-        }
+        },
         Err(err) => report_call_error("listModels", &err),
     }
 }
@@ -129,10 +131,14 @@ async fn demo_chat_completion_json(client: &mut OpenAiClient) {
     };
 
     match client.call(request).await {
-        Ok(create_chat_completion::Response::Status200Json(payload)) => log_chat_response(&payload),
-        Ok(create_chat_completion::Response::Status200Sse(_)) => {
-            info!("server returned SSE despite the json default");
-        }
+        Ok(resp) => match resp.body {
+            create_chat_completion::ResponseBody::Status200Json(payload) => {
+                log_chat_response(&payload)
+            }
+            create_chat_completion::ResponseBody::Status200Sse(_) => {
+                info!("server returned SSE despite the json default");
+            }
+        },
         Err(err) => report_call_error("createChatCompletion", &err),
     }
 }
@@ -160,11 +166,11 @@ async fn demo_chat_completion_stream(client: &mut OpenAiClient) {
         }
     };
 
-    match response {
-        create_chat_completion::Response::Status200Sse(stream) => {
+    match response.body {
+        create_chat_completion::ResponseBody::Status200Sse(stream) => {
             log_sse_stream(stream).await;
         }
-        create_chat_completion::Response::Status200Json(_) => {
+        create_chat_completion::ResponseBody::Status200Json(_) => {
             info!("server fell back to the json branch despite Accept: {SSE_ACCEPT}");
         }
     }
@@ -228,12 +234,14 @@ async fn demo_transcription(client: &mut OpenAiClient) {
 
     let request = create_transcription::Request { body };
     match client.call(request).await {
-        Ok(create_transcription::Response::Status200Json(payload)) => {
-            log_transcription_json(&payload)
-        }
-        Ok(create_transcription::Response::Status200Sse(_)) => {
-            info!("server picked the streaming branch; not handled in this demo");
-        }
+        Ok(resp) => match resp.body {
+            create_transcription::ResponseBody::Status200Json(payload) => {
+                log_transcription_json(&payload)
+            }
+            create_transcription::ResponseBody::Status200Sse(_) => {
+                info!("server picked the streaming branch; not handled in this demo");
+            }
+        },
         Err(err) => report_call_error("createTranscription", &err),
     }
 }

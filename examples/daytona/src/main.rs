@@ -64,15 +64,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn demo_list_organizations(client: &mut DaytonaClient) {
     info!("GET /organizations");
     match client.call(list_orgs::Request {}).await {
-        Ok(list_orgs::Response::Status200(orgs)) => {
-            info!(count = orgs.len(), "organizations returned");
-            for org in orgs.iter().take(5) {
-                log_org(org);
+        Ok(resp) => match resp.body {
+            list_orgs::ResponseBody::Status200(orgs) => {
+                info!(count = orgs.len(), "organizations returned");
+                for org in orgs.iter().take(5) {
+                    log_org(org);
+                }
+                if orgs.len() > 5 {
+                    info!(omitted = orgs.len() - 5, "… remaining organizations elided");
+                }
             }
-            if orgs.len() > 5 {
-                info!(omitted = orgs.len() - 5, "… remaining organizations elided");
-            }
-        }
+        },
         Err(err) => report_call_error("listOrganizations", &err),
     }
 }
@@ -88,18 +90,20 @@ async fn demo_list_sandboxes(client: &mut DaytonaClient) {
         })
         .await
     {
-        Ok(list_sandboxes::Response::Status200(sandboxes)) => {
-            info!(count = sandboxes.len(), "sandboxes returned");
-            for sb in sandboxes.iter().take(5) {
-                info!(id = %sb.id, name = %sb.name, "sandbox");
+        Ok(resp) => match resp.body {
+            list_sandboxes::ResponseBody::Status200(sandboxes) => {
+                info!(count = sandboxes.len(), "sandboxes returned");
+                for sb in sandboxes.iter().take(5) {
+                    info!(id = %sb.id, name = %sb.name, "sandbox");
+                }
+                if sandboxes.len() > 5 {
+                    info!(
+                        omitted = sandboxes.len() - 5,
+                        "… remaining sandboxes elided"
+                    );
+                }
             }
-            if sandboxes.len() > 5 {
-                info!(
-                    omitted = sandboxes.len() - 5,
-                    "… remaining sandboxes elided"
-                );
-            }
-        }
+        },
         Err(err) => report_call_error("listSandboxes", &err),
     }
 }

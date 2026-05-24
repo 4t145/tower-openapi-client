@@ -56,6 +56,7 @@ impl<'a> Generator<'a> {
         // disambiguates across operations.
         let request_ident = type_ident("Request");
         let response_ident = type_ident("Response");
+        let response_body_ident = type_ident("ResponseBody");
 
         // Registry keys still need to be globally unique because
         // `items` / `type_paths` are flat maps. Use the full mod path
@@ -90,7 +91,12 @@ impl<'a> Generator<'a> {
 
         // Build response variants up front: their declared MIMEs feed
         // the auto-emitted `Accept` header, and the same set is used to
-        // shape the response enum and `ParseResponse` impl below.
+        // shape the response body enum and `ParseResponse` impl below.
+        // The wrapping `Response` struct bundles `headers` next to a
+        // `ResponseBody` enum so call sites can read response headers
+        // without losing the typed body. Pass `response_ident` as the
+        // hoist parent so synthesised body-payload type names like
+        // `ResponseStatus200JsonBody` stay stable across the rename.
         let response_variants = self.build_response_variants(&response_ident, operation)?;
         let accept_header = build_accept_header_value(&response_variants);
 
@@ -105,14 +111,23 @@ impl<'a> Generator<'a> {
         );
         self.store_unnamed(request_impl);
 
-        let response_item = build_response_enum(&response_ident, &response_variants);
+        let response_body_item = build_response_body_enum(&response_body_ident, &response_variants);
+        self.store_named(
+            format!("__op/{key_prefix}/ResponseBody"),
+            response_body_ident.clone(),
+            response_body_item,
+        );
+
+        let response_struct_item =
+            build_response_struct(&response_ident, &response_body_ident, &response_variants);
         self.store_named(
             format!("__op/{key_prefix}/Response"),
             response_ident.clone(),
-            response_item,
+            response_struct_item,
         );
 
-        let response_impl = build_parse_response_impl(&response_ident, &response_variants);
+        let response_impl =
+            build_parse_response_impl(&response_ident, &response_body_ident, &response_variants);
         self.store_unnamed(response_impl);
 
         let operation_impl = build_operation_impl(&request_ident, &response_ident);
@@ -371,7 +386,7 @@ impl<'a> Generator<'a> {
     /// a single unit variant.
     fn build_response_variants(
         &mut self,
-        enum_ident: &syn::Ident,
+        parent_ident: &syn::Ident,
         operation: &Operation,
     ) -> Result<Vec<ResponseVariant>, Error> {
         let mut out: Vec<ResponseVariant> = Vec::new();
@@ -409,7 +424,7 @@ impl<'a> Generator<'a> {
                 let ty = match codec {
                     CodecKind::Json | CodecKind::Xml => match media.schema.as_ref() {
                         Some(schema_or_ref) => Some(self.field_type_from_schema(
-                            enum_ident,
+                            parent_ident,
                             &format!("{variant_ident}Body"),
                             schema_or_ref,
                         )?),
@@ -423,7 +438,7 @@ impl<'a> Generator<'a> {
                     CodecKind::Ndjson => match media.schema.as_ref() {
                         Some(schema_or_ref) => {
                             let inner = self.field_type_from_schema(
-                                enum_ident,
+                                parent_ident,
                                 &format!("{variant_ident}Body"),
                                 schema_or_ref,
                             )?;
@@ -894,13 +909,27 @@ fn build_request_struct(
     }
 }
 
-/// Assembles the response enum from resolved variants.
+/// Returns the derives applied to response types, accounting for
+/// variants that carry stream payloads. Stream codecs (`Sse`, `Ndjson`)
+/// don't implement `Debug` / `Clone` / `PartialEq`, and may also be
+/// feature-gated out at the runtime level — drop the derives entirely
+/// in that case so the enum still compiles.
+fn response_derives(variants: &[ResponseVariant]) -> proc_macro2::TokenStream {
+    let has_streaming = variants
+        .iter()
+        .any(|v| matches!(v.codec, Some(CodecKind::Sse | CodecKind::Ndjson)));
+    if has_streaming {
+        quote! {}
+    } else {
+        quote! { #[derive(Debug, Clone, PartialEq)] }
+    }
+}
+
+/// Assembles the response body enum from resolved variants.
 ///
-/// `Debug` / `Clone` / `PartialEq` derives are dropped when any variant
-/// carries a streaming payload (`SseEventStream`, `NdjsonStream<_>`):
-/// stream types don't implement those traits, and the `Cargo.toml`
-/// feature gating may also leave the underlying types unavailable.
-fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn::Item {
+/// The enum holds the typed payload for one decoded response. Headers
+/// live on the wrapping `Response` struct; see [`build_response_struct`].
+fn build_response_body_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn::Item {
     if variants.is_empty() {
         return parse_quote! {
             #[derive(Debug, Clone, PartialEq)]
@@ -912,15 +941,7 @@ fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn:
         };
     }
 
-    let has_streaming = variants
-        .iter()
-        .any(|v| matches!(v.codec, Some(CodecKind::Sse | CodecKind::Ndjson)));
-    let derive_attr = if has_streaming {
-        quote! {}
-    } else {
-        quote! { #[derive(Debug, Clone, PartialEq)] }
-    };
-
+    let derive_attr = response_derives(variants);
     let variant_tokens: Vec<proc_macro2::TokenStream> = variants
         .iter()
         .map(|v| {
@@ -943,6 +964,28 @@ fn build_response_enum(ident: &syn::Ident, variants: &[ResponseVariant]) -> syn:
         #derive_attr
         pub enum #ident {
             #(#variant_tokens,)*
+        }
+    }
+}
+
+/// Assembles the wrapping `Response` struct that pairs decoded headers
+/// with the typed body. Keeping headers next to the body lets call
+/// sites read both off a single value (`response.headers.get(...)`,
+/// `response.body`).
+fn build_response_struct(
+    ident: &syn::Ident,
+    body_ident: &syn::Ident,
+    variants: &[ResponseVariant],
+) -> syn::Item {
+    let derive_attr = response_derives(variants);
+    parse_quote! {
+        #derive_attr
+        pub struct #ident {
+            /// Response headers as received from the wire.
+            pub headers: ::http::HeaderMap,
+            /// Decoded body, dispatched by status (and Content-Type
+            /// when the spec declares multiple codecs per status).
+            pub body: #body_ident,
         }
     }
 }
@@ -1199,6 +1242,7 @@ fn build_operation_impl(request_ident: &syn::Ident, response_ident: &syn::Ident)
 /// `default` response.
 fn build_parse_response_impl(
     response_ident: &syn::Ident,
+    body_ident: &syn::Ident,
     variants: &[ResponseVariant],
 ) -> syn::Item {
     let parse_response = crate::constants::runtime_path("ParseResponse");
@@ -1208,14 +1252,14 @@ fn build_parse_response_impl(
     let groups = group_variants_by_status(variants);
     let arms: Vec<proc_macro2::TokenStream> = groups
         .iter()
-        .filter_map(|(status, group)| status_dispatch_arm(status, group))
+        .filter_map(|(status, group)| status_dispatch_arm(body_ident, status, group))
         .collect();
     let default_group = groups
         .iter()
         .find(|(status, _)| status.eq_ignore_ascii_case("default"))
         .map(|(_, group)| group.clone());
     let fallback = match default_group {
-        Some(group) => default_fallback_tokens(response_ident, &group),
+        Some(group) => render_status_group_body(body_ident, &group),
         None => quote! {
             ::std::mem::drop(__body);
             return ::std::result::Result::Err(
@@ -1240,8 +1284,7 @@ fn build_parse_response_impl(
     let needs_content_type = groups.iter().any(|(_, g)| g.len() > 1);
     let content_type_binding = if needs_content_type {
         quote! {
-            let __content_type = __parts
-                .headers
+            let __content_type = __headers
                 .get(::http::header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok())
                 .map(|s| {
@@ -1252,12 +1295,15 @@ fn build_parse_response_impl(
         quote! {}
     };
 
-    // When the enum is the `Empty`-only placeholder (no responses
+    // When the body enum is the `Empty`-only placeholder (no responses
     // declared), always return that variant without touching the body.
     let empty_fallback = if variants.is_empty() {
         quote! {
             ::std::mem::drop(__body);
-            return ::std::result::Result::Ok(#response_ident::Empty);
+            return ::std::result::Result::Ok(Self {
+                headers: __headers,
+                body: #body_ident::Empty,
+            });
         }
     } else {
         quote! {}
@@ -1282,6 +1328,7 @@ fn build_parse_response_impl(
                 async move {
                     let (__parts, __body) = response.into_parts();
                     let __status = __parts.status;
+                    let __headers = __parts.headers;
                     #content_type_binding
                     #empty_fallback
                     #arm_tokens
@@ -1320,30 +1367,28 @@ fn group_variants_by_status(variants: &[ResponseVariant]) -> Vec<(String, Vec<&R
 /// Builds the match arm body for one status group. Returns `None` for
 /// statuses that can't be expressed as a `u16` (e.g. `2XX`, `default`).
 fn status_dispatch_arm(
+    body_ident: &syn::Ident,
     status: &str,
     group: &[&ResponseVariant],
 ) -> Option<proc_macro2::TokenStream> {
     let status_num: u16 = status.parse().ok()?;
-    let body = render_status_group_body(group);
+    let body = render_status_group_body(body_ident, group);
     Some(quote! {
         #status_num => { #body }
     })
 }
 
-/// Tokens that decode a status group's body. When the group has a single
-/// variant we just decode straight into it; multiple codec branches
-/// dispatch on the lowercased `Content-Type` (without parameters).
-fn render_status_group_body(group: &[&ResponseVariant]) -> proc_macro2::TokenStream {
+/// Tokens that decode a status group's body and return the wrapping
+/// `Response { headers, body }`. When the group has a single variant we
+/// just decode straight into it; multiple codec branches dispatch on the
+/// lowercased `Content-Type` (without parameters).
+fn render_status_group_body(
+    body_ident: &syn::Ident,
+    group: &[&ResponseVariant],
+) -> proc_macro2::TokenStream {
     if group.len() == 1 {
         let variant = group[0];
-        let id = &variant.variant_ident;
-        return match &variant.inner_type {
-            Some(_) => decode_variant_body(variant, quote! { Self::#id }),
-            None => quote! {
-                ::std::mem::drop(__body);
-                return ::std::result::Result::Ok(Self::#id);
-            },
-        };
+        return render_variant_return(body_ident, variant);
     }
 
     // Multi-codec status: pick the branch whose declared MIME matches the
@@ -1357,14 +1402,7 @@ fn render_status_group_body(group: &[&ResponseVariant]) -> proc_macro2::TokenStr
             continue;
         };
         let mime_lc = mime.to_ascii_lowercase();
-        let id = &variant.variant_ident;
-        let decode = match &variant.inner_type {
-            Some(_) => decode_variant_body(variant, quote! { Self::#id }),
-            None => quote! {
-                ::std::mem::drop(__body);
-                return ::std::result::Result::Ok(Self::#id);
-            },
-        };
+        let decode = render_variant_return(body_ident, variant);
         arms.push(quote! {
             ::std::option::Option::Some(__ct) if __ct == #mime_lc => {
                 #decode
@@ -1372,24 +1410,34 @@ fn render_status_group_body(group: &[&ResponseVariant]) -> proc_macro2::TokenStr
         });
     }
 
-    // Fallback variant when Content-Type is missing or matched none of
-    // the declared MIMEs — pick the first branch (typically the JSON one
-    // because of `codec_sort_key`'s ordering).
     let fallback_variant = group[0];
-    let fb_id = &fallback_variant.variant_ident;
-    let fallback = match &fallback_variant.inner_type {
-        Some(_) => decode_variant_body(fallback_variant, quote! { Self::#fb_id }),
-        None => quote! {
-            ::std::mem::drop(__body);
-            return ::std::result::Result::Ok(Self::#fb_id);
-        },
-    };
+    let fallback = render_variant_return(body_ident, fallback_variant);
 
     quote! {
         match __content_type.as_deref() {
             #(#arms)*
             _ => { #fallback }
         }
+    }
+}
+
+/// Tokens that build the wrapping `Self { headers: __headers, body: ... }`
+/// return for one variant. Unit variants return without consuming the
+/// body, payload variants decode through their codec first.
+fn render_variant_return(
+    body_ident: &syn::Ident,
+    variant: &ResponseVariant,
+) -> proc_macro2::TokenStream {
+    let id = &variant.variant_ident;
+    match &variant.inner_type {
+        Some(_) => decode_variant_body(variant, quote! { #body_ident::#id }),
+        None => quote! {
+            ::std::mem::drop(__body);
+            return ::std::result::Result::Ok(Self {
+                headers: __headers,
+                body: #body_ident::#id,
+            });
+        },
     }
 }
 
@@ -1717,72 +1765,13 @@ fn render_encoder_with_default_or_override(
     }
 }
 
-/// Tokens that consume the body into the `default` variant when
-/// present. Mirrors [`render_status_group_body`] but constructs the
-/// variants as `#response_ident::#variant_ident` (this helper is invoked
-/// from the fallback arm where `Self` is not in scope).
-fn default_fallback_tokens(
-    response_ident: &syn::Ident,
-    group: &[&ResponseVariant],
-) -> proc_macro2::TokenStream {
-    if group.len() == 1 {
-        let variant = group[0];
-        let id = &variant.variant_ident;
-        return match &variant.inner_type {
-            Some(_) => decode_variant_body(variant, quote! { #response_ident::#id }),
-            None => quote! {
-                ::std::mem::drop(__body);
-                return ::std::result::Result::Ok(#response_ident::#id);
-            },
-        };
-    }
-
-    let mut arms: Vec<proc_macro2::TokenStream> = Vec::with_capacity(group.len());
-    for variant in group {
-        let Some(mime) = variant.content_type.as_deref() else {
-            continue;
-        };
-        let mime_lc = mime.to_ascii_lowercase();
-        let id = &variant.variant_ident;
-        let decode = match &variant.inner_type {
-            Some(_) => decode_variant_body(variant, quote! { #response_ident::#id }),
-            None => quote! {
-                ::std::mem::drop(__body);
-                return ::std::result::Result::Ok(#response_ident::#id);
-            },
-        };
-        arms.push(quote! {
-            ::std::option::Option::Some(__ct) if __ct == #mime_lc => {
-                #decode
-            }
-        });
-    }
-
-    let fallback_variant = group[0];
-    let fb_id = &fallback_variant.variant_ident;
-    let fallback = match &fallback_variant.inner_type {
-        Some(_) => decode_variant_body(fallback_variant, quote! { #response_ident::#fb_id }),
-        None => quote! {
-            ::std::mem::drop(__body);
-            return ::std::result::Result::Ok(#response_ident::#fb_id);
-        },
-    };
-
-    quote! {
-        match __content_type.as_deref() {
-            #(#arms)*
-            _ => { #fallback }
-        }
-    }
-}
-
 /// Decodes `__body` through the appropriate codec into the variant
-/// payload and returns the wrapping enum value. `constructor` is the
-/// tokenised path of the tuple-variant constructor (e.g.
-/// `Self::Status200` or `GetPetResponse::Default`).
+/// payload and returns the wrapping `Self { headers, body }` value.
+/// `body_constructor` is the tokenised path of the body-enum tuple
+/// variant (e.g. `ResponseBody::Status200`).
 fn decode_variant_body(
     variant: &ResponseVariant,
-    constructor: proc_macro2::TokenStream,
+    body_constructor: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let decode_error = crate::constants::runtime_path("DecodeError");
     let decode_body = crate::constants::runtime_body_codec_path("decode_body");
@@ -1805,7 +1794,10 @@ fn decode_variant_body(
         let __value = #decode_body(&__decoder, __body)
             .await
             .map_err(|e| #decode_error::Codec(::std::convert::Into::into(e)))?;
-        return ::std::result::Result::Ok(#constructor(__value));
+        return ::std::result::Result::Ok(Self {
+            headers: __headers,
+            body: #body_constructor(__value),
+        });
     }
 }
 

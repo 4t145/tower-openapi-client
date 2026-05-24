@@ -100,7 +100,9 @@ where
 {
     info!("GET /zen");
     match client.call(get_zen::Request {}).await {
-        Ok(get_zen::Response::Status200(quote)) => info!(quote = %quote, "zen"),
+        Ok(resp) => match resp.body {
+            get_zen::ResponseBody::Status200(quote) => info!(quote = %quote, "zen"),
+        },
         Err(err) => warn!(error = %err, "zen call failed"),
     }
 }
@@ -118,7 +120,9 @@ where
         s: Some("hello from toac".to_string()),
     };
     match client.call(request).await {
-        Ok(get_octocat::Response::Status200) => info!("octocat returned 200"),
+        Ok(resp) => match resp.body {
+            get_octocat::ResponseBody::Status200 => info!("octocat returned 200"),
+        },
         Err(err) => warn!(error = %err, "octocat call failed"),
     }
 }
@@ -133,8 +137,10 @@ where
 {
     info!("GET /meta");
     match client.call(get_meta::Request {}).await {
-        Ok(get_meta::Response::Status200(overview)) => log_meta(&overview),
-        Ok(get_meta::Response::Status304) => info!("meta returned 304 Not Modified"),
+        Ok(resp) => match resp.body {
+            get_meta::ResponseBody::Status200(overview) => log_meta(&overview),
+            get_meta::ResponseBody::Status304 => info!("meta returned 304 Not Modified"),
+        },
         Err(err) => warn!(error = %err, "meta call failed"),
     }
 }
@@ -152,18 +158,20 @@ where
         username: username.to_string(),
     };
     match client.call(request).await {
-        Ok(get_user::Response::Status200(body)) => {
-            // The body's enum name carries a synthetic numeric suffix
-            // (`ResponseStatus200Body9789`) that collision-avoidance
-            // appends; `try_into` reaches the variant payload without
-            // having to spell that ident out.
-            if let Ok(public) = PublicUser::try_from(body.clone()) {
-                log_public_user(&public);
-            } else if let Ok(private) = PrivateUser::try_from(body) {
-                log_private_user(&private);
+        Ok(resp) => match resp.body {
+            get_user::ResponseBody::Status200(body) => {
+                // The body's enum name carries a synthetic numeric suffix
+                // (`ResponseStatus200Body9789`) that collision-avoidance
+                // appends; `try_into` reaches the variant payload without
+                // having to spell that ident out.
+                if let Ok(public) = PublicUser::try_from(body.clone()) {
+                    log_public_user(&public);
+                } else if let Ok(private) = PrivateUser::try_from(body) {
+                    log_private_user(&private);
+                }
             }
-        }
-        Ok(get_user::Response::Status404(_)) => warn!(username, "user not found"),
+            get_user::ResponseBody::Status404(_) => warn!(username, "user not found"),
+        },
         Err(err) => warn!(error = %err, "user call failed"),
     }
 }

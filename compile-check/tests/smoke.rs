@@ -27,6 +27,7 @@ use toac_compile_check::{
 // Shorter aliases for the type-checked tests below.
 type GetPetRequest = get_pet::Request;
 type GetPetResponse = get_pet::Response;
+type GetPetResponseBody = get_pet::ResponseBody;
 type CreatePetRequest = create_pet::Request;
 type CreatePetResponse = create_pet::Response;
 
@@ -83,8 +84,8 @@ fn get_response_decodes_200_and_404() {
         ))))
         .unwrap();
     let decoded = futures_executor::block_on(GetPetResponse::parse_response(ok)).expect("ok");
-    match decoded {
-        GetPetResponse::Status200(pet) => {
+    match decoded.body {
+        GetPetResponseBody::Status200(pet) => {
             assert_eq!(pet.id, "abc");
             assert_eq!(pet.name, "rex");
         }
@@ -99,7 +100,7 @@ fn get_response_decodes_200_and_404() {
         .unwrap();
     let decoded =
         futures_executor::block_on(GetPetResponse::parse_response(not_found)).expect("ok");
-    assert!(matches!(decoded, GetPetResponse::Status404(_)));
+    assert!(matches!(decoded.body, GetPetResponseBody::Status404(_)));
 }
 
 #[test]
@@ -109,7 +110,7 @@ fn unknown_status_falls_through_to_default() {
         .body(Body::new(Full::new(Bytes::from(r#"{"message":"boom"}"#))))
         .unwrap();
     let decoded = futures_executor::block_on(GetPetResponse::parse_response(resp)).expect("ok");
-    assert!(matches!(decoded, GetPetResponse::Default(_)));
+    assert!(matches!(decoded.body, GetPetResponseBody::Default(_)));
 }
 
 // --- ApiClient end-to-end with a canned transport ---
@@ -166,8 +167,8 @@ fn api_client_end_to_end() {
     });
 
     let resp = resp.expect("call ok");
-    match resp {
-        GetPetResponse::Status200(pet) => assert_eq!(pet.name, "rex"),
+    match resp.body {
+        GetPetResponseBody::Status200(pet) => assert_eq!(pet.name, "rex"),
         other => panic!("unexpected response {other:?}"),
     }
     assert_eq!(
