@@ -4,8 +4,7 @@
 //! `Accept` header reads — without spinning up a full
 //! `Generator`.
 
-use std::collections::BTreeMap;
-
+use oas3::Map;
 use oas3::spec::MediaType;
 use syn::parse_quote;
 
@@ -21,16 +20,17 @@ fn empty_media_type() -> MediaType {
     MediaType {
         schema: None,
         examples: None,
-        encoding: BTreeMap::new(),
-        extensions: BTreeMap::new(),
+        encoding: Map::new(),
+        extensions: Map::new(),
     }
 }
 
-fn content(mimes: &[&str]) -> BTreeMap<String, MediaType> {
-    mimes
-        .iter()
-        .map(|mime| ((*mime).to_string(), empty_media_type()))
-        .collect()
+fn content(mimes: &[&str]) -> Map<String, MediaType> {
+    let mut out = Map::new();
+    for mime in mimes {
+        out.insert((*mime).to_string(), empty_media_type());
+    }
+    out
 }
 
 fn variant(status: &str, codec: Option<CodecKind>, content_type: Option<&str>) -> ResponseVariant {

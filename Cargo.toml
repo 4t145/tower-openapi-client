@@ -37,7 +37,7 @@ serde_json = "1"
 thiserror = "2"
 tower = "0.5"
 tower-http = "0.6"
-oas3 = { version = "0.21", features = ["yaml-spec"] }
+oas3 = { version = "0.22", features = ["yaml-spec"] }
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full", "visit-mut"] }

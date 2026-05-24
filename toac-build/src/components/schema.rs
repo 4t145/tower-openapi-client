@@ -20,6 +20,34 @@ use crate::{
     naming::{field_ident, make_ident, type_ident},
 };
 
+/// Projects a top-level [`Schema`] (post-resolution) onto its
+/// [`ObjectSchema`] payload. Boolean schemas (`true` / `false`) collapse
+/// to the empty `ObjectSchema` because the generator treats them as the
+/// "any value" / "no value" fallback elsewhere — keeping callers
+/// uniform avoids threading the boolean-vs-object distinction through
+/// every helper that consumed the old `ObjectOrReference<ObjectSchema>`
+/// shape.
+pub(crate) fn schema_to_object(schema: &Schema) -> ObjectSchema {
+    match schema {
+        Schema::Boolean(_) => ObjectSchema::default(),
+        Schema::Object(boxed) => match boxed.as_ref() {
+            ObjectOrReference::Object(inner) => inner.clone(),
+            ObjectOrReference::Ref {
+                ref_path,
+                summary,
+                description,
+            } => ObjectSchema {
+                // Builds a synthetic `Ref` schema so `flatten_all_of` and
+                // friends can resolve through it without losing the
+                // pointer.
+                description: description.clone().or_else(|| summary.clone()),
+                title: Some(format!("$ref: {ref_path}")),
+                ..ObjectSchema::default()
+            },
+        },
+    }
+}
+
 /// Visibility tokens applied to all generated items.
 fn visibility() -> syn::Visibility {
     parse_quote!(pub)
@@ -32,13 +60,9 @@ impl<'a> Generator<'a> {
     ///
     /// Propagates resolution errors from `$ref` walking and generator errors
     /// for unsupported constructs.
-    pub fn ensure_schema(
-        &mut self,
-        name: &str,
-        schema_or_ref: &ObjectOrReference<ObjectSchema>,
-    ) -> Result<syn::Type, Error> {
+    pub fn ensure_schema(&mut self, name: &str, schema: &Schema) -> Result<syn::Type, Error> {
         let ref_path = format!("{SCHEMA_REF_PREFIX}{name}");
-        self.ensure_named_schema(&ref_path, name, schema_or_ref)
+        self.ensure_named_schema(&ref_path, name, schema)
     }
 
     /// Pre-registers a component schema's Rust type identifier so that
@@ -73,7 +97,7 @@ impl<'a> Generator<'a> {
         &mut self,
         ref_path: &str,
         display_name: &str,
-        schema_or_ref: &ObjectOrReference<ObjectSchema>,
+        schema: &Schema,
     ) -> Result<syn::Type, Error> {
         if let Some(ty) = self.type_paths.get(ref_path) {
             // A reservation means we haven't actually emitted yet — we
@@ -92,7 +116,7 @@ impl<'a> Generator<'a> {
         // function.
         self.reserved_refs.remove(ref_path);
 
-        let resolved = self.resolve(schema_or_ref)?;
+        let resolved = self.resolve_schema(schema)?;
         let item = self.build_named_item(&type_name, &resolved)?;
         self.items.insert(ref_path.to_owned(), item);
         self.push_ref_path(ref_path.to_owned());
@@ -197,7 +221,7 @@ impl<'a> Generator<'a> {
         &mut self,
         parent_type: &syn::Ident,
         field_name: &str,
-        field_schema: &ObjectOrReference<ObjectSchema>,
+        field_schema: &Schema,
         required: &[String],
     ) -> Result<syn::Field, Error> {
         let is_required = required.iter().any(|r| r == field_name);
@@ -237,12 +261,32 @@ impl<'a> Generator<'a> {
         &mut self,
         parent_type: &syn::Ident,
         field_name: &str,
+        field_schema: &Schema,
+    ) -> Result<(syn::Type, InlineDocs), Error> {
+        match field_schema {
+            // `true` allows any value, `false` allows none. Both fall
+            // back to `serde_json::Value` here — see `array_item_type_inline`
+            // for the reasoning around `false`.
+            Schema::Boolean(_) => Ok((json_any(), InlineDocs::default())),
+            Schema::Object(boxed) => self.inline_type_or_ref(parent_type, field_name, boxed),
+        }
+    }
+
+    /// Same as [`Self::inline_type`] but takes the inner
+    /// `ObjectOrReference<ObjectSchema>` directly. Used by helpers that
+    /// already hold the borrowed reference (e.g. allOf single-ref
+    /// shortcut, sum-variant resolution).
+    pub(crate) fn inline_type_or_ref(
+        &mut self,
+        parent_type: &syn::Ident,
+        field_name: &str,
         field_schema: &ObjectOrReference<ObjectSchema>,
     ) -> Result<(syn::Type, InlineDocs), Error> {
         if let ObjectOrReference::Ref { ref_path, .. } = field_schema {
             match ref_name(ref_path) {
                 Some(name) => {
-                    let ty = self.ensure_named_schema(ref_path, name, field_schema)?;
+                    let wrapped = Schema::Object(Box::new(field_schema.clone()));
+                    let ty = self.ensure_named_schema(ref_path, name, &wrapped)?;
                     let ty = self.qualify_for_current_stage(ty);
                     return Ok((ty, InlineDocs::default()));
                 }
@@ -372,7 +416,7 @@ impl<'a> Generator<'a> {
             // (which has no `Serialize` / `Deserialize`).
             Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_any()),
             Some(Schema::Object(inner)) => {
-                let (ty, _) = self.inline_type(parent, field_name, inner)?;
+                let (ty, _) = self.inline_type_or_ref(parent, field_name, inner.as_ref())?;
                 Ok(ty)
             }
         }
@@ -401,7 +445,7 @@ impl<'a> Generator<'a> {
             // but we still need a serde-compatible placeholder.
             Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_any()),
             Some(Schema::Object(inner)) => {
-                let (ty, _) = self.inline_type(parent, field_name, inner)?;
+                let (ty, _) = self.inline_type_or_ref(parent, field_name, inner.as_ref())?;
                 Ok(ty)
             }
         }
@@ -474,25 +518,28 @@ impl<'a> Generator<'a> {
         &mut self,
         parent_type: &syn::Ident,
         index: usize,
-        member: &ObjectOrReference<ObjectSchema>,
+        member: &Schema,
         kind: &SumKind,
         used_names: &mut Vec<String>,
     ) -> Result<SumVariant, Error> {
         let (inner_type, ref_name_opt) = match member {
-            ObjectOrReference::Ref { ref_path, .. } => match ref_name(ref_path) {
-                Some(name) => {
-                    let name = name.to_owned();
-                    let ty = self.ensure_named_schema(ref_path, &name, member)?;
-                    let ty = self.qualify_for_current_stage(ty);
-                    (ty, Some(name))
+            Schema::Boolean(_) => (json_any(), None),
+            Schema::Object(boxed) => match boxed.as_ref() {
+                ObjectOrReference::Ref { ref_path, .. } => match ref_name(ref_path) {
+                    Some(name) => {
+                        let name = name.to_owned();
+                        let ty = self.ensure_named_schema(ref_path, &name, member)?;
+                        let ty = self.qualify_for_current_stage(ty);
+                        (ty, Some(name))
+                    }
+                    None => (json_any(), None),
+                },
+                ObjectOrReference::Object(schema) => {
+                    let field_name = format!("variant_{index}");
+                    let ty = self.inline_object_type(parent_type, &field_name, schema)?;
+                    (ty, None)
                 }
-                None => (json_any(), None),
             },
-            ObjectOrReference::Object(schema) => {
-                let field_name = format!("variant_{index}");
-                let ty = self.inline_object_type(parent_type, &field_name, schema)?;
-                (ty, None)
-            }
         };
 
         let (ident, serde_rename) = sum_variant_ident(
@@ -757,7 +804,7 @@ fn json_any() -> syn::Type {
 /// If the schema is `allOf: [$ref]` (optionally with `nullable: true` in
 /// another slot), return the single reference. Used to thread through
 /// `allOf` wrappers that are typically introduced just to attach nullability.
-fn allof_single_ref(schema: &ObjectSchema) -> Option<&ObjectOrReference<ObjectSchema>> {
+fn allof_single_ref(schema: &ObjectSchema) -> Option<&Schema> {
     if schema.all_of.len() != 1 {
         return None;
     }
@@ -799,13 +846,30 @@ fn flatten_all_of(schema: &ObjectSchema, spec: &oas3::Spec) -> Option<ObjectSche
 
     let mut merged = schema_without_all_of(schema);
     for member in &schema.all_of {
-        let resolved = member.resolve(spec).ok()?;
+        let resolved = resolve_object_member(member, spec)?;
         if !is_object_like_for_merge(&resolved) {
             return None;
         }
         fold_into(&mut merged, &resolved, spec)?;
     }
     Some(merged)
+}
+
+/// Resolves one `Schema` member of a logical clause (`allOf` / `oneOf` /
+/// `anyOf`) into an [`ObjectSchema`]. Boolean members are not
+/// representable as object-shaped schemas, so they signal "skip this
+/// merge" by returning `None` — same outcome as a primitive member.
+fn resolve_object_member(member: &Schema, spec: &oas3::Spec) -> Option<ObjectSchema> {
+    match member {
+        Schema::Boolean(_) => None,
+        Schema::Object(boxed) => match boxed.as_ref() {
+            ObjectOrReference::Object(inner) => Some(inner.clone()),
+            ObjectOrReference::Ref { ref_path, .. } => {
+                let resolved = <Schema as oas3::spec::FromRef>::from_ref(spec, ref_path).ok()?;
+                Some(schema_to_object(&resolved))
+            }
+        },
+    }
 }
 
 /// Clones `schema` into the seed for a merge, stripping the `allOf` so the
@@ -847,18 +911,21 @@ fn is_object_like_for_merge(schema: &ObjectSchema) -> bool {
 /// so a deep chain collapses to one struct.
 fn fold_into(target: &mut ObjectSchema, member: &ObjectSchema, spec: &oas3::Spec) -> Option<()> {
     for nested in &member.all_of {
-        let resolved = nested.resolve(spec).ok()?;
+        let resolved = resolve_object_member(nested, spec)?;
         if !is_object_like_for_merge(&resolved) {
             return None;
         }
         fold_into(target, &resolved, spec)?;
     }
 
+    // `oas3::Map` is order-preserving but lacks an `entry` API, so guard
+    // each insert with `contains_key` to keep the "first-write wins"
+    // semantics that the original `BTreeMap::entry().or_insert_with`
+    // expressed.
     for (name, prop) in &member.properties {
-        target
-            .properties
-            .entry(name.clone())
-            .or_insert_with(|| prop.clone());
+        if !target.properties.contains_key(name) {
+            target.properties.insert(name.clone(), prop.clone());
+        }
     }
     for req in &member.required {
         if !target.required.contains(req) {
@@ -920,7 +987,7 @@ fn detect_sum_kind(schema: &ObjectSchema) -> Option<SumKind> {
 
 /// Returns the member list backing a sum schema. Callers should only invoke
 /// this when [`detect_sum_kind`] reported a match.
-fn sum_members(schema: &ObjectSchema) -> &[ObjectOrReference<ObjectSchema>] {
+fn sum_members(schema: &ObjectSchema) -> &[Schema] {
     if !schema.one_of.is_empty() {
         &schema.one_of
     } else {

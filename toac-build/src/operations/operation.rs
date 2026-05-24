@@ -4,10 +4,8 @@
 use std::collections::BTreeMap;
 
 use http::Method;
-use oas3::spec::{
-    MediaType, ObjectOrReference, ObjectSchema, Operation, Parameter, ParameterIn, ParameterStyle,
-    PathItem,
-};
+use oas3::Map;
+use oas3::spec::{MediaType, Operation, Parameter, ParameterIn, ParameterStyle, PathItem, Schema};
 use quote::quote;
 use syn::parse_quote;
 
@@ -461,9 +459,9 @@ impl<'a> Generator<'a> {
         &mut self,
         parent: &syn::Ident,
         hint: &str,
-        schema_or_ref: &ObjectOrReference<ObjectSchema>,
+        schema: &Schema,
     ) -> Result<syn::Type, Error> {
-        let (ty, _) = self.inline_type(parent, hint, schema_or_ref)?;
+        let (ty, _) = self.inline_type(parent, hint, schema)?;
         Ok(ty)
     }
 }
@@ -569,7 +567,7 @@ struct ResponseVariant {
 ///
 /// MIMEs whose codec is unknown are skipped — they have no decoder to
 /// drive and would only produce an unconstructable variant.
-fn collect_content_branches(content: &BTreeMap<String, MediaType>) -> Vec<(String, CodecKind)> {
+fn collect_content_branches(content: &Map<String, MediaType>) -> Vec<(String, CodecKind)> {
     let mut by_codec: std::collections::BTreeMap<u8, (String, CodecKind)> =
         std::collections::BTreeMap::new();
     for mime in content.keys() {
@@ -684,7 +682,7 @@ fn should_ignore_parameter(parameter: &Parameter) -> bool {
 /// Returns the first media type in `content` whose key is JSON-shaped
 /// (`application/json`, `application/problem+json`, ...), falling back to
 /// the first entry if none look like JSON.
-fn preferred_media_type(content: &BTreeMap<String, MediaType>) -> Option<(&String, &MediaType)> {
+fn preferred_media_type(content: &Map<String, MediaType>) -> Option<(&String, &MediaType)> {
     if let Some(json) = content
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("application/json"))

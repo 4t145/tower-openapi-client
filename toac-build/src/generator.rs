@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use oas3::spec::{ObjectOrReference, ObjectSchema};
+use oas3::spec::{ObjectOrReference, ObjectSchema, Schema};
 use syn::parse_quote;
 
 use crate::{Error, naming::type_ident};
@@ -226,7 +226,32 @@ impl<'a> Generator<'a> {
         &self,
         schema_or_ref: &ObjectOrReference<ObjectSchema>,
     ) -> Result<ObjectSchema, Error> {
-        Ok(schema_or_ref.resolve(self.spec)?)
+        match schema_or_ref {
+            ObjectOrReference::Object(schema) => Ok(schema.clone()),
+            ObjectOrReference::Ref { ref_path, .. } => {
+                let resolved = <Schema as oas3::spec::FromRef>::from_ref(self.spec, ref_path)?;
+                Ok(crate::components::schema::schema_to_object(&resolved))
+            }
+        }
+    }
+
+    /// Resolves a top-level [`Schema`] (the new `oas3` 0.22 type) against
+    /// the bound spec, returning an [`ObjectSchema`].
+    ///
+    /// Boolean schemas (`true` / `false`) project to the empty
+    /// [`ObjectSchema`] — the generator treats both as the "any value"
+    /// fallback elsewhere; carrying that through one resolver keeps the
+    /// caller code uniform.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Ref`] if a `$ref` cannot be resolved within the
+    /// spec.
+    pub(crate) fn resolve_schema(&self, schema: &Schema) -> Result<ObjectSchema, Error> {
+        match schema {
+            Schema::Boolean(_) => Ok(ObjectSchema::default()),
+            Schema::Object(boxed) => self.resolve(boxed.as_ref()),
+        }
     }
 
     /// Registers a hoisted (anonymous) type alongside its backing item.

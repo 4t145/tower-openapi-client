@@ -25,13 +25,10 @@ impl<'a> Generator<'a> {
             return Ok(());
         };
         // Collect to avoid borrowing `self.spec` across the mutable loop.
-        let schemas: Vec<(
-            String,
-            oas3::spec::ObjectOrReference<oas3::spec::ObjectSchema>,
-        )> = components
+        let schemas: Vec<(String, oas3::spec::Schema)> = components
             .schemas
             .iter()
-            .map(|(name, schema_or_ref)| (name.clone(), schema_or_ref.clone()))
+            .map(|(name, schema)| (name.clone(), schema.clone()))
             .collect();
 
         // Pre-reserve every named schema's type identifier so that
