@@ -14,7 +14,7 @@ path = "src/main.rs"
 toac-build = { workspace = true }
 
 [dependencies]
-toac = { workspace = true, features = ["base64"] }
+toac = { workspace = true, features = ["base64", "xml"] }
 bytes = { workspace = true, features = ["serde"] }
 chrono = { workspace = true }
 http = { workspace = true }

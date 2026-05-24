@@ -69,7 +69,8 @@ async fn demo_get_pet(client: PetstoreClient) {
         .await
     {
         Ok(resp) => match resp.body {
-            GetPetByIdResponseBody::Status200(pet) => {
+            GetPetByIdResponseBody::Status200Json(pet)
+            | GetPetByIdResponseBody::Status200Xml(pet) => {
                 info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet fetched");
             }
             GetPetByIdResponseBody::Status400 => info!("server reported 400 invalid id"),
@@ -92,7 +93,8 @@ async fn demo_get_pet_missing(client: PetstoreClient) {
         .await
     {
         Ok(resp) => match resp.body {
-            GetPetByIdResponseBody::Status200(pet) => {
+            GetPetByIdResponseBody::Status200Json(pet)
+            | GetPetByIdResponseBody::Status200Xml(pet) => {
                 warn!(id = ?pet.id, "unexpected 200 for missing id");
             }
             GetPetByIdResponseBody::Status400 => info!("server reported 400 invalid id"),
@@ -128,7 +130,7 @@ async fn demo_add_pet(client: PetstoreClient) {
 
     match client.oneshot(request).await {
         Ok(resp) => match resp.body {
-            AddPetResponseBody::Status200(pet) => {
+            AddPetResponseBody::Status200Json(pet) | AddPetResponseBody::Status200Xml(pet) => {
                 info!(id = ?pet.id, name = %pet.name, "pet created");
             }
             AddPetResponseBody::Status405 => info!("server reported 405 invalid input"),
@@ -159,7 +161,8 @@ async fn demo_update_pet(client: PetstoreClient) {
 
     match client.oneshot(request).await {
         Ok(resp) => match resp.body {
-            UpdatePetResponseBody::Status200(pet) => {
+            UpdatePetResponseBody::Status200Json(pet)
+            | UpdatePetResponseBody::Status200Xml(pet) => {
                 info!(id = ?pet.id, name = %pet.name, status = ?pet.status, "pet updated");
             }
             UpdatePetResponseBody::Status400 => info!("server reported 400 invalid id"),
