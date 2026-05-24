@@ -136,6 +136,57 @@ fn inline_one_of_member_is_hoisted() {
 }
 
 #[test]
+fn primitive_sum_gets_display_impl() {
+    // `oneOf: [integer, string]` is the canonical "id can be numeric or
+    // string" pattern. Path-parameter rendering calls `ToString` on the
+    // value, so the generated enum must implement `Display`.
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info:
+          title: t
+          version: "0"
+        components:
+          schemas:
+            WorkflowId:
+              oneOf:
+                - type: integer
+                - type: string
+    "##});
+
+    assert!(
+        rendered.contains("impl ::std::fmt::Display for WorkflowId"),
+        "expected Display impl for primitive sum: {rendered}"
+    );
+}
+
+#[test]
+fn complex_sum_has_no_display_impl() {
+    // We can't statically prove that struct variants implement `Display`,
+    // so the impl must be omitted to avoid generating uncompilable code.
+    let rendered = generate(indoc! {r##"
+        openapi: 3.1.0
+        info:
+          title: t
+          version: "0"
+        components:
+          schemas:
+            Cat:
+              type: object
+              properties:
+                meow: { type: string }
+            Pet:
+              oneOf:
+                - $ref: "#/components/schemas/Cat"
+                - type: string
+    "##});
+
+    assert!(
+        !rendered.contains("impl ::std::fmt::Display for Pet"),
+        "Display must not be emitted when a variant wraps a struct: {rendered}"
+    );
+}
+
+#[test]
 fn duplicate_variant_inner_type_skips_redundant_impls() {
     // Both variants wrap the same inner type (String). We keep the enum
     // compiling — only the first From/TryFrom pair is emitted.

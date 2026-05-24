@@ -365,7 +365,12 @@ impl<'a> Generator<'a> {
     ) -> Result<syn::Type, Error> {
         match schema.items.as_deref() {
             Some(Schema::Boolean(spec::BooleanSchema(true))) | None => Ok(json_any()),
-            Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_never()),
+            // `items: false` means "no items allowed" — the array must
+            // be empty on the wire. The element type is unreachable, but
+            // it still has to satisfy serde's bounds, so pick a serde-
+            // compatible bottom-ish type rather than `Infallible`
+            // (which has no `Serialize` / `Deserialize`).
+            Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_any()),
             Some(Schema::Object(inner)) => {
                 let (ty, _) = self.inline_type(parent, field_name, inner)?;
                 Ok(ty)
@@ -390,7 +395,11 @@ impl<'a> Generator<'a> {
         match &schema.additional_properties {
             None => Ok(json_any()),
             Some(Schema::Boolean(spec::BooleanSchema(true))) => Ok(json_any()),
-            Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_never()),
+            // `additionalProperties: false` means the map carries no
+            // extra entries beyond declared properties. Same reasoning
+            // as `items: false` above: the value type is unreachable,
+            // but we still need a serde-compatible placeholder.
+            Some(Schema::Boolean(spec::BooleanSchema(false))) => Ok(json_any()),
             Some(Schema::Object(inner)) => {
                 let (ty, _) = self.inline_type(parent, field_name, inner)?;
                 Ok(ty)
@@ -451,6 +460,10 @@ impl<'a> Generator<'a> {
                 continue;
             }
             out.extend(sum_conversion_impls(type_name, variant));
+        }
+
+        if let Some(display_impl) = sum_display_impl(type_name, &variants) {
+            out.push(display_impl);
         }
 
         Ok(out)
@@ -741,10 +754,6 @@ fn json_any() -> syn::Type {
     parse_quote!(::serde_json::Value)
 }
 
-fn json_never() -> syn::Type {
-    parse_quote!(::std::convert::Infallible)
-}
-
 /// If the schema is `allOf: [$ref]` (optionally with `nullable: true` in
 /// another slot), return the single reference. Used to thread through
 /// `allOf` wrappers that are typically introduced just to attach nullability.
@@ -1018,6 +1027,63 @@ fn disambiguate(candidate: syn::Ident, used: &[String]) -> syn::Ident {
         }
         counter += 1;
     }
+}
+
+/// Inner types we know unconditionally implement [`std::fmt::Display`].
+/// Used by [`sum_display_impl`] to decide whether emitting a `Display`
+/// impl on a sum enum is safe — emitting one over a non-`Display` inner
+/// would fail to compile, so we only opt in when every variant is a
+/// known-displayable primitive.
+///
+/// The list mirrors the primitives produced by [`primitive_type`] plus
+/// the formats from [`apply_format`]; widening it requires confirming
+/// the new type implements `Display` in `core`/`std`.
+const DISPLAY_INNER_TYPES: &[&str] = &["String", "bool", "i32", "i64", "u32", "u64", "f32", "f64"];
+
+/// Emits `Display` for a sum enum when every variant wraps a single
+/// known-displayable primitive (see [`DISPLAY_INNER_TYPES`]).
+///
+/// Path parameters whose schema is `oneOf: [integer, string]` lower to
+/// such enums; without a `Display` impl the generated path-rendering
+/// code (which calls `ToString::to_string` on the field) fails to
+/// compile. Returns `None` when at least one variant wraps a complex
+/// type — a struct or another enum — because we can't statically verify
+/// it implements `Display`.
+fn sum_display_impl(enum_name: &syn::Ident, variants: &[SumVariant]) -> Option<syn::Item> {
+    if variants.is_empty() {
+        return None;
+    }
+    if !variants.iter().all(|v| is_display_inner(&v.inner_type)) {
+        return None;
+    }
+    let arms: Vec<proc_macro2::TokenStream> = variants
+        .iter()
+        .map(|v| {
+            let ident = &v.ident;
+            quote! {
+                #enum_name::#ident(__inner) => ::std::fmt::Display::fmt(__inner, f),
+            }
+        })
+        .collect();
+    Some(parse_quote! {
+        impl ::std::fmt::Display for #enum_name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                match self {
+                    #(#arms)*
+                }
+            }
+        }
+    })
+}
+
+fn is_display_inner(ty: &syn::Type) -> bool {
+    let syn::Type::Path(path) = ty else {
+        return false;
+    };
+    let Some(ident) = path.path.get_ident() else {
+        return false;
+    };
+    DISPLAY_INNER_TYPES.contains(&ident.to_string().as_str())
 }
 
 /// Emits `From<Inner> for Enum` and `TryFrom<Enum> for Inner` impls for one
