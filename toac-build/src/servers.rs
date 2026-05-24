@@ -20,6 +20,7 @@ use syn::parse_quote;
 
 use crate::{
     Error, Generator,
+    attrs::module_inner_attrs,
     docs::push_schema_docs,
     generator::Stage,
     naming::{field_ident, make_ident, to_pascal_case, type_ident},
@@ -73,8 +74,10 @@ impl<'a> Generator<'a> {
                 pub mod servers {}
             };
         }
+        let attrs = module_inner_attrs();
         quote! {
             pub mod servers {
+                #attrs
                 #(#items)*
             }
         }

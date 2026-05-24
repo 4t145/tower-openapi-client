@@ -5,6 +5,7 @@
 //! `toac` crate at runtime; this crate is typically invoked from a
 //! consumer's `build.rs`.
 
+pub mod attrs;
 pub mod builder;
 pub mod components;
 pub mod constants;

@@ -8,7 +8,7 @@ pub mod schema;
 
 use quote::quote;
 
-use crate::{Error, Generator, generator::Stage};
+use crate::{Error, Generator, attrs::module_inner_attrs, generator::Stage};
 
 impl<'a> Generator<'a> {
     /// Registers every schema in `spec.components.schemas` into the
@@ -58,8 +58,10 @@ impl<'a> Generator<'a> {
     pub fn finish_components(&self) -> proc_macro2::TokenStream {
         let mut items = self.items_in_stage(Stage::Components);
         schema::box_recursive_cycles(&mut items);
+        let attrs = module_inner_attrs();
         quote! {
             pub mod components {
+                #attrs
                 #(#items)*
             }
         }

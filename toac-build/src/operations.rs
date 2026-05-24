@@ -8,7 +8,7 @@ pub mod operation;
 
 use quote::quote;
 
-use crate::{Error, Generator, generator::Stage};
+use crate::{Error, Generator, attrs::module_inner_attrs, generator::Stage};
 
 impl<'a> Generator<'a> {
     /// Walks `spec.paths` and emits a request type + response enum per
@@ -65,8 +65,10 @@ impl<'a> Generator<'a> {
         }
 
         let body = root.render();
+        let attrs = module_inner_attrs();
         quote! {
             pub mod operations {
+                #attrs
                 #body
             }
         }
