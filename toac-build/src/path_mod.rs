@@ -1,7 +1,7 @@
 //! Mapping from OpenAPI URL path templates + HTTP method to the nested
 //! Rust module path an operation lives under.
 //!
-//! Conventions (see `TODO.md` for the full design):
+//! Conventions (see `docs/design/path-mod-reorg.md` for the full design):
 //!
 //! - literal segment `foo` → `to_snake_case("foo")`
 //! - path parameter `{foo}` → `by_{to_snake_case("foo")}`
