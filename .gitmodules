@@ -1,6 +1,14 @@
 [submodule "examples/openai-openapi"]
 	path = examples/openai-openapi
 	url = https://github.com/openai/openai-openapi.git
+	# Heavy upstream spec (tens of MB). Skip on the default
+	# `git submodule update --init --recursive`; opt in with
+	# `git submodule update --init examples/openai-openapi` when
+	# you want to build the openai example.
+	update = none
 [submodule "examples/github-openapi"]
 	path = examples/github-openapi
 	url = https://github.com/github/rest-api-description.git
+	# Even heavier (>100 MB packed). Same opt-in story:
+	# `git submodule update --init examples/github-openapi`.
+	update = none
