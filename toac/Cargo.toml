@@ -45,7 +45,7 @@ futures-executor = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 tokio = { workspace = true }
 wiremock = { workspace = true }
-reqwest = { workspace = true, features = ["rustls-tls"] }
+reqwest = { workspace = true, features = ["rustls"] }
 
 [features]
 # Enables `Base64String`, which wraps `bytes::Bytes` and projects to/from
