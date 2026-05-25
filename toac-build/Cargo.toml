@@ -3,6 +3,13 @@ name = "toac-build"
 description = "Code generator for the `toac` Tower-compatible OpenAPI client runtime. Typically invoked from a consumer's build.rs."
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../README.md"
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 http = { workspace = true }

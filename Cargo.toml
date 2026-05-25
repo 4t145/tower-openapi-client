@@ -1,28 +1,31 @@
 [workspace]
 resolver = "3"
 # In-tree crates:
-# - `toac`          : the runtime library the generated client links against
-# - `toac-build`    : the code generator, invoked from build scripts
-# - `compile-check` : private crate that runs the generator against a
-#                     fixture spec and compiles the result, so any
-#                     regression in emitted code surfaces as a build error
-# - `examples/*`    : usage walkthrough on a real-world spec; opt-in
-members = ["toac", "toac-build", "compile-check", "examples/*"]
+# - `toac`       : the runtime library the generated client links against
+# - `toac-build` : the code generator, invoked from build scripts
+# - `examples/*` : usage walkthroughs on real-world specs; opt-in
+members = ["toac", "toac-build", "examples/*"]
 # Submodule directories under `examples/` host upstream OpenAPI specs (no
 # `Cargo.toml`); cargo would otherwise try to treat them as workspace
 # members because of the glob above.
 exclude = ["examples/openai-openapi", "examples/github-openapi"]
-# Keep day-to-day `cargo test` / `cargo build` on the library + its
-# compile guard; the example is a `cargo run -p petstore-example` affair.
-default-members = ["toac", "toac-build", "compile-check"]
+# `cargo test` / `cargo build` at the workspace root only touches the
+# library + generator. Examples are opt-in via `-p <example>`.
+default-members = ["toac", "toac-build"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/4t145/tower-openapi-client"
+homepage = "https://github.com/4t145/tower-openapi-client"
+readme = "README.md"
+keywords = ["openapi", "tower", "http", "client", "codegen"]
+categories = ["web-programming::http-client", "api-bindings"]
+rust-version = "1.85"
 
 [workspace.dependencies]
-# In-tree crates, referenced by both compile-check and the petstore
-# example through `{ workspace = true }`.
+# In-tree crates, referenced by examples through `{ workspace = true }`.
 toac = { path = "toac", version = "0.1.0" }
 toac-build = { path = "toac-build", version = "0.1.0" }
 
