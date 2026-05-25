@@ -4,6 +4,14 @@
 //! containing the generated Rust client. The output links against the
 //! `toac` crate at runtime; this crate is typically invoked from a
 //! consumer's `build.rs`.
+//!
+//! Many doc comments in this crate refer to types in the `toac` runtime
+//! (e.g. `toac::ApiClient`, `toac::Server`). Since `toac-build` is a
+//! pure code-generator and does not depend on `toac` itself, those
+//! cross-crate intra-doc links cannot be resolved by rustdoc — the
+//! lint is silenced crate-wide rather than littering every reference
+//! with backticks-only spans.
+#![allow(rustdoc::broken_intra_doc_links, rustdoc::private_intra_doc_links)]
 
 pub mod attrs;
 pub mod builder;

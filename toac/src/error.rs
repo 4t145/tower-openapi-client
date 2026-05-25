@@ -2,11 +2,8 @@
 ///
 /// The `Send + Sync` bounds match the convention of `tower::BoxError`
 /// and `hyper::Error`, so transport layers can forward their native
-/// errors into [`body::Body`] and [`DecodeError::BodyRead`] without
-/// extra boxing.
-///
-/// [`body::Body`]: crate::body::Body
-/// [`DecodeError::BodyRead`]: crate::DecodeError::BodyRead
+/// errors into [`crate::body::Body`] and [`crate::DecodeError::Codec`]
+/// without extra boxing.
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Concrete `std::error::Error` wrapper around a [`BoxError`].
