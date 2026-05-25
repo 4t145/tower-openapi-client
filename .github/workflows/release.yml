@@ -1,0 +1,62 @@
+name: Release
+
+# Release policy: `master` is the development branch, `release` is the
+# branch we publish from. A `v*` tag must point at a commit reachable
+# from `origin/release`; tags pushed off `master` (or any other branch)
+# are rejected by the verification step below.
+#
+# `Cargo.toml`'s workspace.package.version must match the tag before it
+# is pushed.
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: cargo publish
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Need history + the `release` branch ref to confirm the tag
+          # lives on it.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag is on the release branch
+        run: |
+          set -euo pipefail
+          git fetch origin release:refs/remotes/origin/release
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/release; then
+            echo "tag ${GITHUB_REF_NAME} (commit ${GITHUB_SHA}) is not reachable from origin/release" >&2
+            echo "publish from the release branch only — see release policy in this workflow" >&2
+            exit 1
+          fi
+
+      - name: Verify tag matches workspace version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          ws=$(grep -m1 -E '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
+          if [ "$tag" != "$ws" ]; then
+            echo "tag ${GITHUB_REF_NAME} does not match workspace version ${ws}" >&2
+            exit 1
+          fi
+
+      # `toac-build` depends on `toac` only via path (not version), so
+      # publish order between the two is irrelevant for resolution.
+      # Publish `toac` first so docs.rs builds it before consumers.
+      - name: Publish toac
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p toac
+
+      - name: Publish toac-build
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: cargo publish -p toac-build
