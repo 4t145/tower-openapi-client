@@ -22,7 +22,7 @@ homepage = "https://github.com/4t145/tower-openapi-client"
 readme = "README.md"
 keywords = ["openapi", "tower", "http", "client", "codegen"]
 categories = ["web-programming::http-client", "api-bindings"]
-rust-version = "1.87"
+rust-version = "1.88"
 
 [workspace.dependencies]
 # In-tree crates, referenced by examples through `{ workspace = true }`.

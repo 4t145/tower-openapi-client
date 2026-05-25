@@ -48,11 +48,11 @@ jobs:
       - run: cargo test --workspace ${{ env.EXCLUDE_EXAMPLES }} --all-features
 
   msrv:
-    name: msrv (1.87)
+    name: msrv (1.88)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.87.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
       # Build only the publishable crates against MSRV — examples pull
       # heavier dev deps and aren't part of the API surface we ship.
