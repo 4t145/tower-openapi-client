@@ -178,7 +178,7 @@ impl<'a> Generator<'a> {
                 let value_ty = self.map_value_type(type_name, schema)?;
                 Ok(parse_quote! {
                     #(#alias_attrs)*
-                    pub type #type_name = ::std::collections::HashMap<String, #value_ty>;
+                    pub type #type_name = ::std::collections::BTreeMap<String, #value_ty>;
                 })
             }
             Shape::Fallback => {
@@ -389,7 +389,7 @@ impl<'a> Generator<'a> {
             }
             Shape::Map => {
                 let value_ty = self.map_value_type_inline(parent_type, field_name, schema)?;
-                parse_quote!(::std::collections::HashMap<String, #value_ty>)
+                parse_quote!(::std::collections::BTreeMap<String, #value_ty>)
             }
             Shape::Fallback => json_any(),
         };
@@ -463,6 +463,7 @@ impl<'a> Generator<'a> {
         schema: &ObjectSchema,
         kind: SumKind,
     ) -> Result<Vec<syn::Item>, Error> {
+        let kind = self.resolve_tagging(schema, kind);
         let members = sum_members(schema);
         let mut variants: Vec<SumVariant> = Vec::with_capacity(members.len());
         let mut used_variant_names: Vec<String> = Vec::with_capacity(members.len());
@@ -515,6 +516,44 @@ impl<'a> Generator<'a> {
         }
 
         Ok(out)
+    }
+
+    /// Decides the final wire tagging for a sum schema.
+    ///
+    /// An OpenAPI discriminator nominally maps to serde's
+    /// internally-tagged form (`#[serde(tag = "...")]`), where serde owns
+    /// the discriminator property and writes it itself. That only holds
+    /// when *no* variant schema also declares the property as a real
+    /// field — otherwise serde emits it twice (and fails to deserialize).
+    /// The field can't simply be stripped, because the same component may
+    /// appear in an untagged `oneOf` elsewhere, where the field is
+    /// mandatory.
+    ///
+    /// So if *any* variant carries the discriminator property itself
+    /// (the common "type"/"role" const-field pattern in the OpenAI spec),
+    /// internal tagging is already unsound and we downgrade to
+    /// `#[serde(untagged)]`: every field stays on its struct and serde
+    /// discriminates on the fixed values. Only a clean discriminator,
+    /// where serde alone owns the tag, keeps the internally-tagged form.
+    fn resolve_tagging(&self, schema: &ObjectSchema, kind: SumKind) -> SumKind {
+        let SumKind::InternallyTagged(d) = &kind else {
+            return kind;
+        };
+        if self.any_variant_declares_property(schema, &d.property_name) {
+            return SumKind::Untagged;
+        }
+        kind
+    }
+
+    /// Returns `true` when at least one member of the sum schema is an
+    /// object schema that declares `property` as one of its own
+    /// properties. Refs are resolved against the spec; members that can't
+    /// be resolved (e.g. `$recursiveRef`) simply don't count.
+    fn any_variant_declares_property(&self, schema: &ObjectSchema, property: &str) -> bool {
+        sum_members(schema).iter().any(|member| {
+            self.resolve_schema(member)
+                .is_ok_and(|resolved| resolved.properties.contains_key(property))
+        })
     }
 
     /// Resolves one `oneOf`/`anyOf` member into a variant definition.
@@ -1230,7 +1269,7 @@ impl InlineDocs {
 // an infinite-size Rust type. We rewrite any such field to hold the value
 // through a `Box` so the recursive definitions compile.
 //
-// Fields whose types are already indirected (`Vec<T>`, `HashMap<_, T>`,
+// Fields whose types are already indirected (`Vec<T>`, `BTreeMap<_, T>`,
 // `Box<T>`, `Option<Vec<T>>`, ...) do not need additional boxing; the heap
 // indirection provided by those containers already breaks the size cycle.
 // ---------------------------------------------------------------------------
